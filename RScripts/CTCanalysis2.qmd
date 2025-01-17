@@ -1,0 +1,550 @@
+---
+title: "CTC Analysis"
+author: "Nikhil Kalra"
+format: 
+  docx:
+    #reference-doc: "PhD-thesis_NK_2024-11"
+    toc: true
+  pdf:
+    toc: true
+editor: visual
+execute:
+  echo: true
+  warning: false
+  output: asis
+fig-dpi: 300
+fig-width: 6
+fig-height: 8
+tbl-cap-location: top
+---
+
+## Loading packages
+
+```{r}
+pacman::p_load(conflicted,  flextable, formattable, ggbeeswarm, ggalluvial,
+               ggbreak, readxl, scales, tidyverse, wrappedtools)
+conflicts_prefer(dplyr::filter)
+conflicts_prefer(formattable::comma)
+
+```
+
+## Importing data
+
+```{r}
+biopsydata <- read_xlsx("Data/CTCanalysis_NK.xlsx")
+baselinedata <- read_xlsx("Data/CTCanalysis_NK.xlsx", sheet = 2)
+qualvars <- ColSeeker(biopsydata,
+                     namepattern=c("^C","meno","Stanze","Ne"))
+```
+
+# Data Cleaning
+
+## Mutating Pathology column
+
+```{r}
+
+rawdata <- 
+  mutate(biopsydata,
+   patho_ER = case_when(str_detect(Pathology, ".*?ER\\s*[><=]?\\s*\\d+%?.*") ~
+              str_replace(Pathology, ".*?(ER\\s*[><=]?\\s*\\d+%?).*", "\\1") |> 
+              str_replace("ER\\s*[><=]?\\s*", "")),
+   
+   patho_PR = case_when(str_detect(Pathology, ".*?PR\\s*[><=]?\\s*\\d+%?.*") ~
+              str_replace(Pathology, ".*?(PR\\s*[><=]?\\s*\\d+%?).*", "\\1")  |>
+              str_replace("PR\\s*[><=]?\\s*", "")),
+   
+   patho_HER2 = case_when(str_detect(Pathology, ".*HER2 \\D{3}.*") ~
+                str_replace(Pathology, ".*(HER2 \\D{3}).*", "\\1") |>
+                str_replace("HER2 ", "")),
+   
+   patho_Ki67 = case_when(str_detect(Pathology,"Ki67 <?\\d+%") ~
+                          str_replace(Pathology, ".*(Ki67 <?\\d+%).*", "\\1") |> 
+                          str_replace("Ki67 ", "")),
+   across(all_of(qualvars$names),factor))
+```
+
+## Mutating Staging column
+
+```{r}
+temp <- rawdata |>
+  select(Staging) |>
+  mutate(
+    bind_rows(lapply(
+      strsplit(Staging, ";"),
+      function(S) as.data.frame(lapply(setNames(nm = c("T","N", "M", "G", "L","V","n","R" )),
+                                       function(z) paste0(grep(pattern = z, x = S, value = TRUE), collapse = ";"))))),
+    across(one_of(c("T","N", "M", "G", "L","V","n","R" )), ~ ifelse(nzchar(.), ., .[NA]))
+  )
+# cM0 the same as M0??
+
+temp$Staging<-NULL # I find select(-Staging more verbose)
+rawdata<-cbind(rawdata,temp)
+# my version #####
+recode_vars <- ColSeeker(namepattern="^.$")
+rawdata |> 
+  as_tibble() |> 
+  mutate(across(all_of(recode_vars$names),
+              ~parse_number(.x),
+              .names="Staging_{.col}")) |> 
+  select(-recode_vars$names)
+##### #### 
+# how about 2 numbers in some cases??
+rawdata$T<-as.numeric(gsub("\\D","", rawdata$T)) #replace with nothing?
+rawdata$N<-as.numeric(gsub("\\D"," ", rawdata$N))
+rawdata$M<-as.numeric(gsub("\\D"," ", rawdata$M))
+rawdata$G<-as.numeric(gsub("\\D"," ", rawdata$G))
+rawdata$L<-as.numeric(gsub("\\D"," ", rawdata$L))
+rawdata$V<-as.numeric(gsub("\\D"," ", rawdata$V))
+rawdata$n<-as.numeric(gsub("\\D"," ", rawdata$n))
+rawdata$R<-as.numeric(gsub("\\D"," ", rawdata$R))
+rm(temp)
+```
+
+# Selecting cases for analysis
+
+1.  Cases where Epithelial cells were detected have to excluded from the study
+2.  Cases with incomplete/damaged/discarded blood have to excluded as well
+
+```{r}
+# possibly code that in variables tohave a single data variable?
+complete_cases <- rawdata |> filter(Stanze_type != "Not_received") |>
+  filter(Cell_Category != "Epithelial") # |> View()
+rawdata <- 
+  rawdata |> 
+  mutate(
+    complete=case_when(
+      Stanze_type != "Not_received" &
+        Cell_Category != "Epithelial"~ "yes",
+      Stanze_type == "Not_received" | 
+        Cell_Category == "Epithelial" ~ "no"),
+    CApositive=case_when(
+      complete == "yes" &
+        Cancer == "positive" ~ "yes",
+      complete == "yes" &
+        Cancer == "negative" ~ "no"))
+#cases with less or no blood samples
+incomplete_cases <- rawdata |> filter(Stanze_type == "Not_received" | Cell_Category == "Epithelial") #  |> View()
+
+#breast cancer positive cases
+Ca_positive_cases <- complete_cases |> filter(Cancer == "positive")
+
+#breast cancer negative cases
+Ca_negative_cases <- complete_cases |> filter(Cancer == "negative")
+
+#Summary_table for samples included in analysis
+summary_data <- complete_cases |>
+  group_by(Cancer) |>
+  summarise(cases = n()) |>
+  mutate(freq = formattable::percent(cases / sum(cases))) 
+  # Store the summary data in a temporary variable using curly braces
+  # { 
+  #   summary_data <- .
+    bind_rows(summary_data, tibble(Cancer = "Total", cases = sum(summary_data$cases), freq = formattable::percent(1))) |> 
+      flextable()
+```
+
+# Plot showing the recruitment of subjects over the study period
+
+```{r}
+rawdata |>
+  select(Date_Acrual, CApositive)  |> 
+  drop_na(Date_Acrual) |>
+  mutate(Individuals = seq(1:length(Date_Acrual))) |>
+  mutate(Date_Acrual = as.Date(Date_Acrual)) |>
+  filter(complete.cases(Date_Acrual)) |>
+  ggplot(aes(x = sort(Date_Acrual), y = Individuals,
+             color=CApositive)) + 
+  geom_point(size = 1.5, shape = 2, alpha = 0.5) +
+  # to include the smooth curve:
+  # geom_smooth(method = 'lm', formula = y ~ poly(x, 2), color = 'red', se = FALSE) +
+  scale_x_date(labels = date_format("%m/%Y"), date_breaks = "5 month") +
+  scale_y_continuous(breaks = seq(0, 170, 20)) +
+  labs(title = "Recruitment from 05/2020 to 10/2023",
+       x = "Timeline (month/Year)",
+       y = "Recruited subjects") +
+  theme_bw() +
+  theme(
+    text = element_text(size = 12),
+    plot.title = element_text(hjust = 0.5),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.ticks.x = element_blank())+
+  facet_grid(rows=vars(CApositive))
+```
+
+# Statistical analysis
+
+## Data preparation
+
+```{r}
+data <- #complete_cases |> 
+  rawdata |> 
+  filter(complete=="yes") |> 
+  select(Patient_ID, Cancer, contains("Method"), -Method01_preII) |>
+  pivot_longer(
+    cols = starts_with("Method"),
+    names_to = c("Method", "Timepoint"),
+    names_sep = "_",
+    values_to = "CTC_Count"
+  ) |> 
+  mutate(Timepoint = recode(Timepoint,
+                            "pre" = "CTC_pre_biopsy",
+                            "post" = "CTC_post_biopsy")) |> 
+  pivot_wider( names_from = Timepoint,
+              values_from = CTC_Count ) |> 
+  mutate(CTC_increase = CTC_pre_biopsy-CTC_post_biopsy) 
+
+head(data, n=10) |> flextable()
+```
+
+## CTC counts before biopsy
+
+```{r}
+# CTCs counts before biopsy: by methods
+CTCs_by_methods <- data |>
+  group_by(Method) |>
+  summarise(
+    n=n(),
+    CTCs_before_biopsy= sum(as.numeric(CTC_pre_biopsy), na.rm = TRUE)) |> 
+  mutate(freq = formattable::percent(CTCs_before_biopsy / sum(CTCs_before_biopsy)))
+# AB what is the % supposed to mean here??
+
+CTCs_by_methods |> flextable()
+
+# CTCs counts before biopsy: by cancer status 
+CTCs_by_cancer <- data |>
+  group_by(Cancer) |>
+  summarise(
+    n=n(),
+    CTCs_before_biopsy= sum(as.numeric(CTC_pre_biopsy), na.rm = TRUE)) |> 
+  mutate(freq = formattable::percent(CTCs_before_biopsy / sum(CTCs_before_biopsy)))
+
+CTCs_by_cancer |> flextable ()
+
+# CTCs counts before biopsy: by methods and cancer status
+# Step 1: Group data
+table_counts <- data %>%
+  group_by(Method, Cancer) %>%
+  summarise(
+    n=n(),
+    count = sum(CTC_pre_biopsy, na.rm = TRUE))
+
+# Step 2: Reshape to wide format
+summary_table <- table_counts %>%
+  pivot_wider(names_from = Cancer, 
+              values_from = c(n,count)) |>
+  rename_with(~str_replace(.x,"_(.*)"," Cancer \\1"))
+  
+  # rename("Cancer_negative" = "negative",
+  #        "Cancer_positive" = "positive")
+colnames(summary_table)[1] <- "CTCs_pre_biopsy"
+
+summary_table |> flextable()
+
+```
+
+## Graphical exploration
+
+```{r}
+data |>
+  filter(Method %in% c("Method01", "Method02")) |>
+  ggplot(aes(x = CTC_increase, fill = Method)) +
+  geom_density(alpha = 0.2) +
+  labs(
+    title = "Density Plot of CTC Increase by Method",
+    x = "CTC Increase",
+    y = "Density",
+    fill = "Method"
+  ) +
+  theme_minimal()
+
+# Check normality for Method A
+shapiro_test_M01 <- shapiro.test(data |> 
+                                   filter(Method == "Method01") |>
+                                   pull(CTC_increase))
+shapiro_test_M01
+# make this a category with levels <= -2, -1, 0, 1, >=2 ??
+# same for actual counts?
+data <- 
+  data |>
+  mutate(CTCpre=factor(CTC_pre_biopsy,
+                       levels=0:10) |> 
+           fct_collapse("0"="0","1"="1",#"2"="2",#"3"="3",
+                        other_level=">1"),
+         CTCpost=factor(CTC_post_biopsy,
+                       levels=0:10) |> 
+           fct_collapse("0"="0","1"="1",#"2"="2",#"3"="3",
+                        other_level=">1"))
+# Check normality for Method B
+shapiro_test_M02 <- shapiro.test(data |> 
+                                   filter(Method == "Method02") |> 
+                                   pull(CTC_increase))
+shapiro_test_M02
+table(data$Method, data$CTCpre)
+fisher.test(data$CTCpre,data$Method)
+table(data$CTCpre, data$CTCpost)
+crosstab <- 
+  data |> 
+  filter(Method=="Method01") |> 
+    group_by(CTCpre, CTCpost) |> 
+  count() |> 
+  pivot_wider(names_from=CTCpost, values_from=n) |> 
+  mutate(across(everything(),
+                ~replace_na(.x,0)))
+fisher.test(crosstab[-1])
+# crosstab2 <-
+#   matrix(c(
+#   data |> 
+#   filter(Method=="Method01") |> 
+#     pull(CTCpre) |>
+#   table(),
+#     data |> 
+#   filter(Method=="Method01") |> 
+#     pull(CTCpost) |>
+#   table()),
+#   nrow = 2,
+#   byrow=T)
+
+mcnemar.test(as.matrix(crosstab[-1]))
+# Conduct paired t-test for Method A if normality is satisfied
+if (shapiro_test_M01$p.value > 0.05) {
+  # Paired t-test for normally distributed data
+  t_test_M01 <- t.test(
+    data %>% filter(Method == "Method01") %>% pull(CTC_post_biopsy),
+    data %>% filter(Method == "Method01") %>% pull(CTC_pre_biopsy),
+    paired = TRUE
+  )
+  print(t_test_M01)
+} else {
+  # Wilcoxon signed-rank test for non-normally distributed data
+  wilcox_test_M01 <- wilcox.test(
+    data %>% filter(Method == "Method01") %>% pull(CTC_post_biopsy),
+    data %>% filter(Method == "Method01") %>% pull(CTC_pre_biopsy),
+    paired = TRUE, correct=FALSE
+  )
+  print(wilcox_test_M01)
+}
+
+# paired t-test for Method B if normality is satisfied
+if (shapiro_test_M02$p.value > 0.05) {
+  # Paired t-test for normally distributed data
+  t_test_M02 <- t.test(
+    data %>% filter(Method == "Method02") %>% pull(CTC_post_biopsy),
+    data %>% filter(Method == "Method02") %>% pull(CTC_pre_biopsy),
+    paired = TRUE
+  )
+  print(t_test_M02)
+} else {
+  # Wilcoxon signed-rank test for non-normally distributed data
+  wilcox_test_M02 <- wilcox.test(
+    data %>% filter(Method == "Method02") %>% pull(CTC_post_biopsy),
+    data %>% filter(Method == "Method02") %>% pull(CTC_pre_biopsy),
+    paired = TRUE
+  )
+  print(wilcox_test_M02)
+}
+
+```
+
+# Concordance plot
+
+```{r}
+complete_cases |> 
+  #filter(!is.na(Method01_pre)) |>
+  ggplot(aes(axis1 = Method01_pre, axis2 = Method01_post)) +
+  geom_alluvium(aes(fill = Method01_pre)) +
+  geom_stratum(width=.325, alpha=0) +
+  labs(title = "Concordance Method01 pre",
+       fill = "Method01_pre") +
+  scale_x_continuous(name = "Replicates",
+                   breaks=1:2,
+                   labels=c("pre1","post1"),
+                   expand = expansion(mult=.01))+
+  theme_minimal()
+```
+
+# Count plot pre- and post-biopsy: Style 01
+
+```{r}
+complete_cases |> 
+  select(contains("Method")) |> 
+  pivot_longer(
+    cols = everything(),
+    names_to = "Measurement",
+    values_to = "Value"
+  ) |> 
+  ggplot(aes(x = Measurement, y = Value)) +
+  geom_beeswarm(alpha=.75) +
+  labs(title = "Boxplot of Measurements for Method 01 and Method 02",
+       x = "Measurement Type",
+       y = "Values") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## Count plot pre- and post-biopsy: Style 02
+
+```{r}
+data_long <- complete_cases |>
+  select(contains("Method"), -Method01_preII) |> 
+  pivot_longer(
+    cols = everything(),
+    names_to = "Measurement",
+    values_to = "Value")
+
+# Manually order the Measurement factor levels
+data_long$Measurement <- factor(
+  data_long$Measurement,
+  levels = c("Method01_pre", "Method01_post", "Method02_pre", "Method02_post", "Method03_pre", "Method03_post"))
+
+# Create the stacked bar chart with manual colors and custom order
+ggplot(data_long, aes(x = Measurement, fill = as.factor(Value))) +
+  geom_bar() +
+  scale_y_continuous(
+    breaks = c(0, 5, 10, 15, 20, 149, 150),
+    expand = c(0, 0)) +
+  scale_y_break(c(30, 149)) +
+  scale_fill_brewer(palette = "Set2") +
+  # scale_fill_manual(  values = c(
+  #     "0" = "#D3D3D3",  # Light gray for 0 values
+  #     "1" = "#1f77b4",  # Blue
+  #     "2" = "#ff7f0e",  # Orange
+  #     "3" = "#2ca02c",  # Green
+  #     "4" = "#d62728",  # Red
+  #     "5" = "#9467bd",  # Purple
+  #     "6" = "#8c564b",  # Brown
+  #     "7" = "#e377c2"  # Pink
+  #     ),
+  #   name = "Value") +
+  labs(
+    title = "Stacked Bar Chart ",
+    x = "Measurement Type",
+    y = "Count",
+    fill = "Value") +
+  geom_text(
+    stat = "count",
+    aes(label = ..count..),
+    position = position_stack(vjust = 0.04),
+    color = "black",
+    size = 3) +
+  theme_minimal() +
+  theme(
+    axis.line.y.right = element_blank(),
+    axis.text.y.right = element_blank(),
+    axis.ticks.y.right = element_blank())
+
+```
+
+## Count plot pre- and post-biopsy: Style 03
+
+```{r}
+df_long <- complete_cases |> 
+  select(Method01_pre, Method01_post) |> 
+  pivot_longer(
+    cols = everything(),
+    names_to = "Measurement",
+    values_to = "Value" ) |> 
+  group_by(Value, Measurement) |> 
+  summarise(Count = n(), .groups = 'drop')
+
+df2_long <- expand.grid(
+  Value = unique(df_long$Value),
+  Measurement = c("Method01_pre", "Method01_post")) |> 
+  left_join(df_long, by = c("Value", "Measurement")) |> 
+  replace_na(list(Count = 0))
+
+df2_long$Measurement <- factor(df2_long$Measurement, levels = c("Method01_pre", "Method01_post"))
+ggplot(df2_long, aes(x = factor(Value), y = Count, fill = Measurement)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.9)) +
+  geom_text(
+    aes(label = Count),
+    position = position_dodge(width = 0.8),
+    vjust = -0.5,
+    size = 3
+  ) +
+  labs(
+    title = "Comparison of Method01 Pre and Post Counts",
+    x = "Value",
+    y = "Count",
+    fill = "Measurement"
+  ) +
+  theme_minimal()
+
+```
+
+# Count plot pre- and post-biopsy: Style 04
+
+```{r}
+# Reshape the data to long format
+df_long <- complete_cases |> 
+  select(starts_with("Method"), -Method01_preII) |> 
+  pivot_longer(
+    cols = everything(),
+    names_to = "Measurement",
+    values_to = "Value")
+
+# Count occurrences of each value per measurement type
+df_counts <- df_long |> 
+  group_by(Value, Measurement) |> 
+  summarise(Count = n(), .groups = 'drop') |> 
+  filter(Value != 0)
+
+# Convert Measurement to factor variable for correct order on X-axis
+df_counts$Measurement <- factor(df_counts$Measurement, levels = c("Method01_pre", "Method01_post", "Method02_pre", "Method02_post"))
+
+# Create the stacked bar chart with counts displayed
+ggplot(df_counts, aes(x = Measurement, y = Value, fill= as.factor(Count))) +
+  geom_bar(stat = "identity") +
+  labs(
+    title = "Stacked Bar Chart of Value Counts per Measurement",
+    x = "Measurement Type",
+    y = "Value",
+    fill = "Count") +
+  scale_y_continuous(expand = c(0, 0)) +
+  scale_fill_brewer(palette = "Set3") +
+  theme_minimal()
+
+```
+
+# Plots suggested by Dr. A. Bushjan
+
+```{r}
+#reliability
+complete_cases |>
+  ggplot(aes(Method01_pre,fill=as.factor(Method02_pre)))+
+  geom_bar()
+
+complete_cases |>
+  ggplot(aes(axis1 = Method01_pre, axis2 = Method02_pre)) +
+  geom_alluvium(aes(fill = Method01_pre)) +
+  geom_stratum(width=.325, alpha=0) +
+  labs(title = "Concordance Method01 pre",
+       fill = "Method01_pre") +
+  scale_x_continuous(name = "Replicates",
+                   breaks=1:2,
+                   labels=c("pre1","pre2"),
+                   expand = expansion(mult=.01))+
+  theme_minimal()
+
+complete_cases |>
+  ggplot(aes(Method01_pre,fill=as.factor(Method02_pre)))+
+  geom_bar()
+
+complete_cases |>
+  ggplot(aes(Method01_pre,fill=as.factor(Method02_pre)))+
+  geom_bar(position="fill")+
+scale_y_continuous("Frequency",
+                   labels=scales::percent)  
+
+complete_cases |> 
+  ggplot(aes(axis1 = Method01_pre, axis2 = Method02_pre)) +
+  geom_alluvium(aes(fill = as.factor(Method01_pre))) +
+  geom_stratum(width=.325, alpha=0) +
+  labs(title = "Concordance Methods 01 and 02 pre",
+       fill = "Method01_pre") +
+  scale_fill_brewer(type = "qual", palette = 2) +
+  scale_x_continuous(name = "Methods",
+                   breaks=1:2,
+                   labels=c("pre1","pre2"),
+                   expand = expansion(mult=.01))+
+  theme_minimal()
+```

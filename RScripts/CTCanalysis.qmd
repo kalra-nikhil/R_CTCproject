@@ -1,0 +1,123 @@
+---
+title: "Untitled"
+format: docx
+editor: visual
+---
+
+```{r}
+pacman::p_load(conflicted, tidyverse,wrappedtools,readxl,
+               ggalluvial)
+conflicts_prefer(dplyr::filter)
+```
+
+
+# Import
+
+```{r}
+biopsydata <- read_xlsx("Data/Datasheet_NK.xlsx")
+baselinedata <- read_xlsx("Data/Datasheet_NK.xlsx",
+                          sheet = 2)
+rawdata <- full_join(baselinedata, biopsydata, by = "Patient_ID") |> 
+  rename_with(~str_replace(.x, "\\.y", "")) 
+qualvars <- ColSeeker(rawdata, 
+                      namepattern=c("Cancer","Me","patho",
+                                    "Hi","Ne","St","diag"))
+```
+
+# Data Cleaning
+
+```{r}
+rawdata <- 
+  mutate(rawdata,
+   patho_ER = case_when(str_detect(Pathology,"ER \\d+") ~
+                          str_replace(Pathology,
+                                      ".*(ER \\d+).*",
+                                      "\\1")),
+   patho_PR = case_when(str_detect(Pathology,"PR \\d+") ~
+                          str_replace(Pathology,
+                                      ".*(PR \\d+).*",
+                                      "\\1")),
+   patho_HER2 = case_when(str_detect(Pathology,"HER2 \\D{3}") ~
+                          str_replace(Pathology,
+                                      ".*(HER2 \\D{3}).*",
+                                      "\\1")),
+   patho_Ki67 = case_when(str_detect(Pathology,"Ki67 <?\\d+%") ~
+                          str_replace(Pathology,
+                                      ".*(Ki67 <?\\d+%).*",
+                                      "\\1")),
+   across(all_of(qualvars$names),factor))
+```
+
+```{r}
+#reliability
+rawdata |> 
+  filter(!is.na(Method01_pre1)) |>
+group_by(Method01_pre1,Method01_pre2) |>
+  summarise(n=n()) |>
+  ggplot(aes(Method01_pre1,Method01_pre2,fill=n))+
+  geom_tile()+
+  geom_text(aes(label=n),vjust=1)+
+  theme_minimal()
+
+
+rawdata |> 
+  filter(!is.na(Method01_pre1)) |>
+  ggplot(aes(Method01_pre1,fill=Method01_pre2))+
+  geom_bar()
+
+rawdata |> 
+  filter(!is.na(Method01_pre1)) |>
+  ggplot(aes(axis1 = Method01_pre1, axis2 = Method01_pre2)) +
+  geom_alluvium(aes(fill = Method01_pre1)) +
+  geom_stratum(width=.325, alpha=0) +
+  labs(title = "Concordance Method01 pre",
+       fill = "Method01_pre1") +
+  scale_x_continuous(name = "Replicates",
+                   breaks=1:2,
+                   labels=c("pre1","pre2"),
+                   expand = expansion(mult=.01))+
+  theme_minimal()
+
+rawdata |> 
+filter(!is.na(Method01_pre),!is.na(Method02_pre)) |>
+group_by(Method01_pre,Method02_pre) |>
+  summarise(n=n()) |>
+  ggplot(aes(Method01_pre,Method02_pre,fill=n))+
+  geom_tile()+
+  geom_text(aes(label=n),vjust=1)+
+  theme_minimal()
+rawdata |> 
+filter(!is.na(Method01_pre),!is.na(Method02_pre)) |>
+    ggplot(aes(Method01_pre,fill=Method02_pre))+
+  geom_bar()
+rawdata |> 
+  filter(!is.na(Method01_pre),!is.na(Method02_pre)) |>
+  ggplot(aes(Method01_pre,fill=Method02_pre))+
+  geom_bar(position="fill")+
+scale_y_continuous("Frequency",
+                   labels=scales::percent)  
+
+rawdata |> 
+  filter(!is.na(Method01_pre),
+         !is.na(Method02_pre),
+         Cancer=="positive",
+         !(Method01_pre==0 & Method02_pre==0)) |>
+  mutate(Method01_pre=factor(Method01_pre,
+                             levels=0:5),
+         Method02_pre=factor(Method02_pre,
+                             levels=0:5),
+         ) |> 
+  ggplot(aes(axis1 = Method01_pre, axis2 = Method02_pre)) +
+  geom_alluvium(aes(fill = Method01_pre)) +
+  geom_stratum(width=.325, alpha=1, aes(fill=Method02_pre)) +
+  labs(title = "Concordance Methods 01 and 02 pre",
+       fill = "CTC count") +
+  scale_fill_brewer(type = "qual", palette = 2,
+                    breaks=0:5) +
+  scale_x_continuous(name = "Methods",
+                   breaks=1:2,
+                   labels=c("Method1","Method2"),
+                   expand = expansion(mult=.01))+
+  theme_minimal()
+```
+
