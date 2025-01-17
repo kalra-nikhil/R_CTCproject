@@ -1,95 +1,1182 @@
 ---
-title: "Untitled"
-format: docx
+title: "CTC Analysis"
+author: "Nikhil Kalra"
+format: 
+  docx:
+    #reference-doc: "PhD-thesis_NK_2024-11"
+    toc: true
+  pdf:
+    toc: true
 editor: visual
+execute:
+  echo: true
+  warning: false
+  output: asis
+fig-dpi: 300
+fig-width: 6
+fig-height: 8
+tbl-cap-location: top
 ---
 
+# Loading packages
+
 ```{r}
-pacman::p_load(conflicted, tidyverse,wrappedtools,readxl,
-               ggalluvial)
+pacman::p_load(conflicted, flextable, formattable, ggbeeswarm,
+               ggalluvial, ggbreak, here, readxl, scales, tidyverse,
+               wrappedtools)
 conflicts_prefer(dplyr::filter)
+conflicts_prefer(formattable::comma)
+conflicts_prefer(readxl::read_xlsx)
+
 ```
 
-
-# Import
+# Importing data
 
 ```{r}
-biopsydata <- read_xlsx("Data/Datasheet_NK.xlsx")
-baselinedata <- read_xlsx("Data/Datasheet_NK.xlsx",
-                          sheet = 2)
-rawdata <- full_join(baselinedata, biopsydata, by = "Patient_ID") |> 
-  rename_with(~str_replace(.x, "\\.y", "")) 
-qualvars <- ColSeeker(rawdata, 
-                      namepattern=c("Cancer","Me","patho",
-                                    "Hi","Ne","St","diag"))
+biopsydata <- read_xlsx("Data/CTCanalysis_NK.xlsx")
+baselinedata <- read_xlsx("Data/CTCanalysis_NK.xlsx", sheet = 2)
+qualvars <- ColSeeker(biopsydata,
+                     namepattern=c("^C","meno","Stanze","Ne"))
 ```
 
 # Data Cleaning
 
+## Mutating Pathology column
+
 ```{r}
 rawdata <- 
-  mutate(rawdata,
-   patho_ER = case_when(str_detect(Pathology,"ER \\d+") ~
-                          str_replace(Pathology,
-                                      ".*(ER \\d+).*",
-                                      "\\1")),
-   patho_PR = case_when(str_detect(Pathology,"PR \\d+") ~
-                          str_replace(Pathology,
-                                      ".*(PR \\d+).*",
-                                      "\\1")),
-   patho_HER2 = case_when(str_detect(Pathology,"HER2 \\D{3}") ~
-                          str_replace(Pathology,
-                                      ".*(HER2 \\D{3}).*",
-                                      "\\1")),
-   patho_Ki67 = case_when(str_detect(Pathology,"Ki67 <?\\d+%") ~
-                          str_replace(Pathology,
-                                      ".*(Ki67 <?\\d+%).*",
-                                      "\\1")),
-   across(all_of(qualvars$names),factor))
+  biopsydata |> 
+  mutate(
+    patho_ER = case_when(
+      str_detect(Pathology, ".*?ER\\s*[><=]?\\s*\\d+%?.*") ~
+        str_replace(Pathology, ".*?(ER\\s*[><=]?\\s*\\d+%?).*", "\\1") |> 
+        str_replace("ER\\s*[><=]?\\s*", "")
+    ),
+    patho_PR = case_when(
+      str_detect(Pathology, ".*?PR\\s*[><=]?\\s*\\d+%?.*") ~
+        str_replace(Pathology, ".*?(PR\\s*[><=]?\\s*\\d+%?).*", "\\1") |> 
+        str_replace("PR\\s*[><=]?\\s*", "")
+    ),
+    patho_HER2 = case_when(
+      str_detect(Pathology, ".*HER2 \\D{3}.*") ~
+        str_replace(Pathology, ".*(HER2 \\D{3}).*", "\\1") |> 
+        str_replace("HER2 ", "")
+    ),
+    patho_Ki67 = case_when(
+      str_detect(Pathology, "Ki67 <?\\d+%") ~
+        str_replace(Pathology, ".*(Ki67 <?\\d+%).*", "\\1") |> 
+        str_replace_all("Ki67\\s*|[<%]", "")
+    )
+  ) |> 
+  mutate(
+    across(all_of(qualvars$names), factor) # Convert specific columns to factors
+  )
+
 ```
+
+## Mutating Staging column
+
+```{r}
+identifiers <- c("T", "N", "M", "G", "L", "V", "n", "R")
+
+# Extract columns dynamically and automate column naming
+rawdata <- rawdata %>%
+  mutate(Staging = replace_na(Staging, "")) %>%  # Replace NA with empty strings
+  bind_cols(
+    map_dfc(identifiers, ~ tibble(!!paste0(.x, "_stage") := str_extract(rawdata$Staging, paste0(.x, "[A-Za-z0-9]{1}"))))
+  ) %>%
+  mutate(across(ends_with("_stage"), ~ str_replace_all(., "^.*?(\\w)$", "\\1")))  # Extract only single character
+
+```
+
+# Selecting cases for analysis
+
+1.  Cases where Epithelial cells were detected have to excluded from the study
+2.  Cases with incomplete/damaged/discarded blood have to excluded as well
+
+```{r}
+rawdata <- 
+  rawdata |> 
+  mutate(
+    complete=case_when(
+      # Stanze_type != "Not_received" &
+      #   Cell_Category != "Epithelial"~ "yes",
+      Stanze_type == "Not_received" | 
+        Cell_Category == "Epithelial" ~ "no",
+      .default = "yes"),
+    CApositive=case_when(
+      complete == "yes" &
+        Cancer == "positive" ~ "yes",
+      complete == "yes" &
+        Cancer == "negative" ~ "no"))
+
+#Summary_table for samples included in analysis
+summary_data <- rawdata |>
+  group_by(Cancer) |>
+  summarise(
+    overall_cases = n(),  # Total cases
+    selected_cases = sum(complete == "yes", na.rm = TRUE)) |>  # Selected cases
+  mutate(
+    overall_freq = formattable::percent(overall_cases / sum(overall_cases)),
+    selected_freq = formattable::percent(selected_cases / sum(selected_cases)))
+
+bind_rows(
+  summary_data,
+  tibble(
+    Cancer = "Total",
+    overall_cases = sum(summary_data$overall_cases, na.rm = TRUE),
+    selected_cases = sum(summary_data$selected_cases, na.rm = TRUE),
+    overall_freq = formattable::percent(1),  # Total frequency = 100%
+    selected_freq = formattable::percent(1)  # Total selected frequency = 100%
+  )
+) |> flextable()
+
+```
+
+# Table 1 : Clinicopathological parameters
+
+```{r}
+# Age plot
+rawdata |>
+  filter(complete=="yes") |>
+  select(Age, Cancer) |> 
+  filter(!is.na(Age)) |> 
+  ggplot(aes(Age, color=Cancer)) + geom_density()
+
+# p-value: Age
+## Normality test
+rawdata |> 
+  filter(complete == "yes") |>
+  group_by(Cancer) |> 
+  summarise(cases = n(),
+            shapiro_pvalue = shapiro.test(Age)$p.value)
+
+## Wilcoxon test
+rawdata |> 
+  filter(complete == "yes") |>
+  wilcox.test(Age ~ Cancer, data = _)
+
+# CTC positive cases before biopsy
+rawdata |> 
+  filter(complete == "yes") |> 
+  group_by(Cancer) |> 
+  summarise(
+    Method01 = list(Method01_pre[Method01_pre > 0]),
+    Method02 = list(Method02_pre[Method02_pre > 0])
+  ) |> 
+ summarise(
+    shapiro_CTCs_Method01 = shapiro.test(unlist(Method01))$p.value,
+    shapiro_CTCs_Method02 = shapiro.test(unlist(Method02))$p.value,
+    wilcox_pvalue = wilcox.test(unlist(Method01), unlist(Method02), exact = FALSE)$p.value
+  )
+
+# CTC counts before biopsy
+rawdata |> 
+  filter(complete == "yes") |> 
+  select(Patient_ID, Cancer, Method01_pre, Method02_pre) |> 
+  group_by(Cancer) |> 
+  summarise(
+    across(
+      contains("Method"),
+      ~ sum(.x, na.rm = TRUE),
+      .names = "{.col}_sum"
+    ))
+
+# Clinical variables
+# Initialize a list to store results
+table1 <- list()
+
+# Total counts
+table1$total <- nrow(rawdata |> filter(complete=="yes"))
+
+# Breast cancer status counts
+table1$cancer <- rawdata |> 
+  filter(complete=="yes") |> 
+  group_by(Cancer)  |> 
+  summarise(cases = n()) |> 
+  mutate(freq = formattable::percent(cases / sum(cases)))
+
+# Age at diagnosis: median, min, max
+table1$age <- rawdata |> 
+  filter(complete=="yes") |> 
+  group_by(Cancer) |>
+  summarise(
+    median = median(Age, na.rm = TRUE),
+    min = min(Age, na.rm = TRUE),
+    max = max(Age, na.rm = TRUE))
+
+# Menopause status
+table1$menopause <- rawdata |> 
+  filter(complete == "yes") |> 
+  mutate(
+    Menopause = ifelse(Menopause == "perimenopausal", "postmenopausal", Menopause)
+  ) |> 
+  # Calculate global totals for CA groups
+  mutate(
+    total_CAnegative = sum(Cancer == "negative", na.rm = TRUE),
+    total_CApositive = sum(Cancer == "positive", na.rm = TRUE)
+  ) |> 
+  group_by(Menopause) |> 
+  summarise(
+    negative = sum(Cancer == "negative", na.rm = TRUE),
+    positive = sum(Cancer == "positive", na.rm = TRUE),
+    total_CAnegative = first(total_CAnegative),  # Use global totals for CA-negative
+    total_CApositive = first(total_CApositive),  # Use global totals for CA-positive
+    CA_negative = paste0(negative, " (", formattable::percent(negative / total_CAnegative), ")"),
+    CA_positive = paste0(positive, " (", formattable::percent(positive / total_CApositive), ")")
+  ) |> 
+  select(Menopause, CA_positive, CA_negative)
+
+# Tissue biopsy
+table1$biopsy <- rawdata |> 
+  filter(complete=="yes") |> 
+  mutate(
+    total_negative = sum(Cancer == "negative", na.rm = TRUE),
+    total_positive = sum(Cancer == "positive", na.rm = TRUE)
+  ) |> 
+  group_by(Stanze_type) |> 
+  summarise(
+    negative = sum(Cancer == "negative", na.rm = TRUE),
+    positive = sum(Cancer == "positive", na.rm = TRUE),
+    total_CAnegative = first(total_negative),
+    total_CApositive = first(total_positive),
+    CA_negative = paste0(negative," (", formattable::percent(negative/total_CAnegative),")"),
+    CA_positive = paste0(positive," (", formattable::percent(positive/total_CApositive),")")) |> 
+  select(Stanze_type, CA_positive, CA_negative)
+
+# Tissue histology
+rawdata |> 
+  filter(complete == "yes", Cancer=="positive") |> 
+  select(Cancer, Histology) |> 
+  mutate(
+    CApos_hist = case_when(
+      grepl("IDC|NST", Histology, ignore.case = TRUE) ~ "IDC/NST",
+      grepl("DCIS", Histology, ignore.case = TRUE) ~ "DCIS",
+      is.na(Histology) ~ "NA",
+      TRUE ~ Histology)) |> 
+  group_by(CApos_hist) |> 
+  summarise(
+    Cases = n()) |> 
+  ungroup() |> 
+  mutate(Percentage = (Cases / sum(Cases)) * 100)
+
+rawdata |> 
+  filter(complete=="yes", Cancer=="negative") |> 
+  select(Cancer, Histology) |>  
+  mutate(
+    CAneg_hist = case_when(
+      grepl("Fibrosis|Periductal Fibrosis|Fibrous Mastopathy|Cyst|Benign Cyst| Fibromatosis|Necrotic tissue", Histology, ignore.case = TRUE) ~ "Fibrous Lesions",
+      grepl("Fibroadenoma|Fibroma|Hemartom", Histology, ignore.case = TRUE) ~ "Fibrous Tumors",
+      grepl("Intraductal Papilloma|UDH|CLIS", Histology, ignore.case = TRUE) ~ "Epithelial lesions",
+      is.na(Histology) ~ "NA",
+      TRUE ~ Histology)) |> 
+  group_by(CAneg_hist) |> 
+  summarise(
+    Cases = n()) |> 
+  ungroup() |> 
+  mutate(Percentage = (Cases / sum(Cases)) * 100)
+
+# Calculating Table 1 values for ER, PR, HER2, Ki67%
+# ER_status
+table1$ER_status <- rawdata |> 
+  filter(complete=="yes") |> 
+  mutate(
+    ER_status = case_when(
+      patho_ER == "0" ~ "0",
+      is.na(patho_ER) ~ "NA",
+      as.numeric(patho_ER) > 0 ~ ">0"
+      # .default = ">0"
+      # TRUE ~ ">0"
+      )) |> 
+  group_by(ER_status) |> 
+    summarise(negative = sum(Cancer == "negative", na.rm = TRUE),
+              positive = sum(Cancer == "positive", na.rm = TRUE)) |>
+    mutate(total_negative = sum(negative),
+           total_positive = sum(positive),
+           CA_negative = paste0(negative, " (", formattable::percent(negative / total_negative), ")"),
+           CA_positive = paste0(positive, " (", formattable::percent(positive / total_positive), ")")) |>
+    select(ER_status, CA_positive, CA_negative)
+
+# PR_status
+table1$PR_status <- rawdata |> 
+  filter(complete=="yes") |> 
+  mutate(
+    PR_status = case_when(
+      patho_PR == "0" ~ "0",
+      is.na(patho_PR) ~ "NA",
+      as.numeric(patho_PR) > 0 ~ ">0"
+      # .default = ">0"
+      # TRUE ~ ">0"
+      )) |> 
+  group_by(PR_status) |> 
+    summarise(negative = sum(Cancer == "negative", na.rm = TRUE),
+              positive = sum(Cancer == "positive", na.rm = TRUE)) |>
+    mutate(total_negative = sum(negative),
+           total_positive = sum(positive),
+           CA_negative = paste0(negative, " (", formattable::percent(negative / total_negative), ")"),
+           CA_positive = paste0(positive, " (", formattable::percent(positive / total_positive), ")")) |>
+    select(PR_status, CA_positive, CA_negative)
+
+# HER2_status
+table1$HER2_status <- rawdata |> 
+    filter(complete=="yes") |> 
+    group_by(patho_HER2) |> 
+    summarise(negative = sum(Cancer == "negative", na.rm = TRUE),
+              positive = sum(Cancer == "positive", na.rm = TRUE)) |>
+    mutate(total_negative = sum(negative),
+           total_positive = sum(positive),
+           CA_negative = paste0(negative, " (", formattable::percent(negative / total_negative), ")"),
+           CA_positive = paste0(positive, " (", formattable::percent(positive / total_positive), ")")) |>
+    select(patho_HER2, CA_positive, CA_negative)
+
+# Ki67_status
+table1$Ki67_status <- rawdata |> 
+    filter(complete=="yes") |> 
+    mutate(
+    patho_Ki67 = case_when(
+      patho_Ki67 <= 15 ~ "<=15% (low)",
+      patho_Ki67 > 15 ~ ">15% (high)",
+      is.na(patho_Ki67) ~ "NA"
+      # .default = ">0"
+      # TRUE ~ ">0"
+      )) |>
+    group_by(patho_Ki67) |> 
+    summarise(negative = sum(Cancer == "negative", na.rm = TRUE),
+              positive = sum(Cancer == "positive", na.rm = TRUE)) |>
+    mutate(total_negative = sum(negative),
+           total_positive = sum(positive),
+           CA_negative = paste0(negative, " (", formattable::percent(negative / total_negative), ")"),
+           CA_positive = paste0(positive, " (", formattable::percent(positive / total_positive), ")")) |>
+    select(patho_Ki67, CA_positive, CA_negative)
+
+# Molecular subtype
+rawdata |> 
+  # Convert numeric columns while leaving patho_HER2 as character
+  mutate(across(c(patho_ER, patho_PR, patho_Ki67), ~ as.numeric(.))) |> 
+  filter(complete == "yes", Cancer=="negative") |> 
+  select(Cancer, contains("patho_")) |>  
+  # Apply the subtyping logic
+  mutate(
+    Subtype = case_when(
+      # Luminal A
+      (patho_ER > 0 | patho_PR > 0) & patho_HER2 == "neg" & patho_Ki67 <= 15 ~ "Luminal_A",
+      # Luminal B
+      (patho_ER > 0 | patho_PR > 0) & (patho_HER2 %in% c("neg", "pos")) & patho_Ki67 > 15 ~ "Luminal_B",
+      # HER2-enriched
+      patho_ER == 0 & patho_PR == 0 & patho_HER2 == "pos" & patho_Ki67 >= 0 ~ "HER2/neu",
+      # Triple Negative Breast Cancer (TNBC)
+      patho_ER == 0 & patho_PR == 0 & patho_HER2 == "neg" & patho_Ki67 >= 0 ~ "TNBC",
+      # patho_ER == 0 & patho_PR == 0 & patho_HER2 == "neg" & (patho_Ki67 > 15 & patho_Ki67 <= 30) ~ "TNBC",
+      # # Basal-like (Subtype of TNBC)
+      # patho_ER == 0 & patho_PR == 0 & patho_HER2 == "neg" & patho_Ki67 > 30 ~ "Basal-like",
+      # # Claudin-low (Subtype of TNBC, stem-like features)
+      # patho_ER == 0 & patho_PR == 0 & patho_HER2 == "neg" & (patho_Ki67 >= 0 & patho_Ki67 <= 15) ~ "Claudin-low",
+      # Triple Positive
+      (patho_ER > 0 | patho_PR > 0) & patho_HER2 == "pos" & patho_Ki67 >= 0 ~ "Triple_Positive",
+      # Normal-like
+      # (patho_ER > 0 | patho_PR > 0) & patho_HER2 == "neg" & patho_Ki67 <= 15 ~ "Normal-like",
+      # Default for unmatched cases
+      TRUE ~ "NA")) |> # view()
+  group_by(Subtype, Cancer) |> 
+  summarise(Cases = n()) |> 
+  ungroup() |> 
+  mutate(Percentage = (Cases / sum(Cases)) * 100)
+
+# Staging: T, N, Metastasis
+table1$T_stage <- rawdata |> 
+    filter(complete=="yes") |> 
+    mutate(
+    T_stage = case_when(
+      T_stage == "i"  ~ "Tis",
+      (T_stage == 1 | T_stage == 2) ~ "T1+T2",
+      (T_stage == 3 | T_stage == 4) ~ "T3+T4",
+      is.na(T_stage) ~ "NA"
+      # .default = ">0"
+      # TRUE ~ ">0"
+      )) |>
+    group_by(T_stage) |> 
+    summarise(negative = sum(Cancer == "negative", na.rm = TRUE),
+              positive = sum(Cancer == "positive", na.rm = TRUE)) |>
+    mutate(total_negative = sum(negative),
+           total_positive = sum(positive),
+           CA_negative = paste0(negative, " (", formattable::percent(negative / total_negative), ")"),
+           CA_positive = paste0(positive, " (", formattable::percent(positive / total_positive), ")")) |>
+    select(T_stage, CA_positive, CA_negative)
+
+# N stage
+table1$N_stage <- rawdata |> 
+    filter(complete=="yes") |> 
+    mutate(
+    N_stage = case_when(
+       N_stage == 0 ~ "N0", 
+       N_stage == "x" ~ "Nx",
+       N_stage == 1 ~ "N1",
+      is.na(N_stage) ~ "NA")) |>
+    group_by(N_stage) |> 
+    summarise(negative = sum(Cancer == "negative", na.rm = TRUE),
+              positive = sum(Cancer == "positive", na.rm = TRUE)) |>
+    mutate(total_negative = sum(negative),
+           total_positive = sum(positive),
+           CA_negative = paste0(negative, " (", formattable::percent(negative / total_negative), ")"),
+           CA_positive = paste0(positive, " (", formattable::percent(positive / total_positive), ")")) |>
+    select(N_stage, CA_positive, CA_negative)
+
+# M stage
+table1$M_stage <- rawdata |> 
+    filter(complete=="yes") |> 
+    mutate(
+    M_stage = case_when(
+      M_stage == 0 ~ "M0",
+      M_stage == "x" | M_stage == "X" ~ "Mx",
+      M_stage == 1 ~ "M1",
+      is.na(M_stage) ~ "NA" )) |>
+    group_by(M_stage) |> 
+    summarise(negative = sum(Cancer == "negative", na.rm = TRUE),
+              positive = sum(Cancer == "positive", na.rm = TRUE)) |>
+    mutate(total_negative = sum(negative),
+           total_positive = sum(positive),
+           CA_negative = paste0(negative, " (", formattable::percent(negative / total_negative), ")"),
+           CA_positive = paste0(positive, " (", formattable::percent(positive / total_positive), ")")) |>
+    select(M_stage, CA_positive, CA_negative)
+
+# Tumor grade
+table1$G_stage <- rawdata |> 
+    filter(complete=="yes") |> 
+    mutate(
+    G_stage = case_when(
+      (G_stage == 1 | G_stage == 2) ~ "G1+G2",
+      (G_stage == 3) ~ "G3",
+      is.na(G_stage) ~ "NA"
+      )) |>
+    group_by(G_stage) |> 
+    summarise(negative = sum(Cancer == "negative", na.rm = TRUE),
+              positive = sum(Cancer == "positive", na.rm = TRUE)) |>
+    mutate(total_negative = sum(negative),
+           total_positive = sum(positive),
+           CA_negative = paste0(negative, " (", formattable::percent(negative / total_negative), ")"),
+           CA_positive = paste0(positive, " (", formattable::percent(positive / total_positive), ")")) |>
+    select(G_stage, CA_positive, CA_negative)
+
+# Global function for all clinical parameters
+variables <- c("L_stage", "V_stage", "n_stage", "R_stage")
+
+# if (!exists("table1")) table1 <- list()
+# Loop through variables and assign results to table1
+for (var in variables) {
+  table1[[var]] <- rawdata |> 
+    filter(complete=="yes") |> 
+    mutate(
+      Group = case_when(
+        .data[[var]] == "0" ~ "0",
+        is.na(.data[[var]]) ~ "NA",
+        TRUE ~ "1"
+      )
+    ) |>
+    group_by(Group) |>
+    summarise(
+      negative = sum(Cancer == "negative", na.rm = TRUE),
+      positive = sum(Cancer == "positive", na.rm = TRUE)
+    ) |>
+    mutate(
+      total_negative = sum(negative),
+      total_positive = sum(positive),
+      CA_negative = paste0(negative, " (",
+                           formattable::percent(negative / total_negative), ")"),
+      CA_positive = paste0(positive, " (",
+                           formattable::percent(positive / total_positive), ")")
+    ) |>
+    select(Group, CA_positive, CA_negative)
+}
+
+print(names(table1))
+
+```
+
+# Table 2: CTC counts from both methods
+
+## Overall cases:
+
+```{r}
+## Before biopsy
+summary_data <- rawdata |>  
+  filter(complete == "yes") |> 
+  select(Patient_ID, Cancer, contains("pre"), -Method01_preII) |> 
+  summarise(across(
+    starts_with("Method"),
+    list(
+      sum = ~sum(.x, na.rm = TRUE),
+      positive_cases = ~sum(.x > 0, na.rm = TRUE),
+      median = ~median(.x[.x > 0], na.rm = TRUE),  # Median for positive cases only
+      range = ~if (any(.x > 0, na.rm = TRUE)) {
+        paste0(range(.x[.x > 0], na.rm = TRUE), collapse = " - ")
+      } else {
+        NA_character_
+      }
+    ),
+    .names = "{.col}_{.fn}"  # Dynamically name columns
+  ))
+
+# Reshape the result to a long table with rows for Method01 and Method02
+summary_data %>%
+  mutate(across(everything(), as.character)) |> 
+  pivot_longer(
+    cols = everything(),
+    names_to = c("CTCs_pre_biopsy"),
+    values_to = "Value"
+  ) |> 
+# pivot_wider( names_from = CTCs_pre_biopsy,
+#             values_from = Summary) 
+  flextable() |> 
+  set_caption(caption = "Overall cases: CTCs Pre-Biopsy") |> 
+  set_table_properties(width = 0.8, layout = "autofit")
+
+
+## After biopsy
+summary_data <- rawdata |>  
+      filter(complete=="yes") |> 
+      select(Patient_ID, Cancer, contains("post")) |>
+      summarise(across(
+        starts_with("Method"),
+        list(
+      sum = ~sum(.x, na.rm = TRUE),
+      positive_cases = ~sum(.x > 0, na.rm = TRUE),
+      median = ~median(.x[.x > 0], na.rm = TRUE),  # Median for positive cases only
+      range = ~if (any(.x > 0, na.rm = TRUE)) {
+        paste0(range(.x[.x > 0], na.rm = TRUE), collapse = " - ")  
+        # Range for positive cases only
+      } else {
+        NA_character_
+      }
+    ),
+    .names = "{.col}_{.fn}"  # Dynamically name columns
+  ))
+
+# Reshape the result to a long table with rows for Method01 and Method02
+summary_data %>%
+  mutate(across(everything(), as.character)) |> 
+  pivot_longer(
+    cols = everything(),
+    names_to = c("CTCs_post_biopsy"),
+    values_to = "Value"
+  ) |> 
+# pivot_wider( names_from = CTCs_pre_biopsy,
+#             values_from = Summary) 
+  flextable() |> 
+  set_caption(caption = "Overall cases: CTCs Post-Biopsy") |> 
+  set_table_properties(width = 0.8, layout = "autofit")
+
+
+## Combined: Before + After biopsy
+summary_data <- rawdata |>  
+      filter(complete=="yes") |> 
+      mutate(Method01_combined = Method01_pre + Method01_post,
+             Method02_combined = Method02_pre + Method02_post) |> 
+      select(Patient_ID, Cancer, contains("Method"), -Method01_preII) |>
+      summarise(across(
+        contains("combined"),
+        list(
+              sum = ~sum(.x, na.rm = TRUE),
+              positive_cases = ~sum(.x > 0, na.rm = TRUE),
+              median = ~median(.x[.x > 0], na.rm = TRUE),  # Median for positive cases only
+              range = ~if (any(.x > 0, na.rm = TRUE)) {
+                paste0(range(.x[.x > 0], na.rm = TRUE), collapse = " - ")  
+                # Range for positive cases only
+              } else {
+                NA_character_
+              }
+            ),
+            .names = "{.col}_{.fn}"  # Dynamically name columns
+          ))
+
+# Reshape the result to a long table with rows for Method01 and Method02
+summary_data %>%
+  mutate(across(everything(), as.character)) |> 
+  pivot_longer(
+    cols = everything(),
+    names_to = c("Combined_CTCs"),
+    values_to = "Value"
+  ) |>
+  flextable() |> 
+  set_caption(caption = "Overall cases: Combined CTCs (pre- & post-biopsy)") |> 
+  set_table_properties(width = 0.8, layout = "autofit")
+
+```
+
+## Overall cases: Wilcoxon, McNemar, Kendall's tau, Cohen's kappa
+
+```{r}
+# Load necessary libraries
+# install.packages("irr")
+# install.packages("vcd")
+# install.packages("tau")
+
+# Load necessary libraries
+library(stats) # For Wilcoxon test
+library(irr)   # For Cohen's kappa
+library(vcd)   # For McNemar test
+library(tau)   # For Kendall's tau
+
+# Example data from the table
+Method01_ctc <- list(
+  pre = rawdata |> filter(complete=="yes" ) |> pull(Method01_pre),
+  post = rawdata |> filter(complete=="yes") |> pull(Method01_post),
+  combined = rawdata |> filter(complete=="yes") |> mutate(Method01_combined = Method01_pre + Method01_post) |> pull(Method01_combined))
+
+Method02_ctc <- list(
+  pre = rawdata |> filter(complete=="yes") |> pull(Method02_pre),
+  post = rawdata |> filter(complete=="yes") |> pull(Method02_post),
+  combined = rawdata |> filter(complete=="yes") |> mutate(Method02_combined = Method02_pre + Method02_post) |> pull(Method02_combined))
+
+## Binary outcomes (positive or negative outcome) for each method
+Metho01_binary <- list(
+  pre = ifelse(Method01_ctc$pre > 0, 1, 0),
+  post = ifelse(Method01_ctc$post > 0, 1, 0),
+  combined = ifelse(Method01_ctc$combined > 0, 1, 0))
+
+Method02_binary <- list(
+  pre = ifelse(Method02_ctc$pre > 0, 1, 0),
+  post = ifelse(Method02_ctc$post > 0, 1, 0),
+  combined = ifelse(Method02_ctc$combined > 0, 1, 0))
+
+# Ensure both datasets are paired (same number of observations)
+if (length(Metho01_binary$pre) != length(Method02_binary$pre)) {
+  stop("The data lengths for 'pre' measurements do not match!")
+}
+
+if (length(Metho01_binary$post) != length(Method02_binary$post)) {
+  stop("The data lengths for 'post' measurements do not match!")
+}
+
+if (length(Metho01_binary$combined) != length(Method02_binary$combined)) {
+  stop("The data lengths for 'post' measurements do not match!")
+}
+
+# Wicoxon Test
+wilcoxon_pre <- wilcox.test(Method01_ctc$pre, Method02_ctc$pre, paired = TRUE, exact=FALSE)$p.value
+wilcoxon_post <- wilcox.test(Method01_ctc$post, Method02_ctc$post, paired = TRUE, exact=FALSE)$p.value
+wilcoxon_combined <- wilcox.test(Method01_ctc$combined, Method02_ctc$combined, paired = TRUE, exact=FALSE)$p.value
+
+# McNemar Test
+# prepare tables for McNemar's test
+table_pre <- table(Metho01_binary$pre, Method02_binary$pre)
+table_post <- table(Metho01_binary$post, Method02_binary$post)
+table_combined <- table(Metho01_binary$combined, Method02_binary$combined)
+
+# McNemar p-values
+McNemar_pre <- mcnemar.test(table_pre)$p.value
+McNemar_post <- mcnemar.test(table_post)$p.value
+McNemar_combined <- mcnemar.test(table_combined)$p.value
+
+# Kendall's Tau estimates: Correlation between CTC numbers
+tau_pre <- cor.test(Method01_ctc$pre, Method02_ctc$pre, method="kendall")
+tau_post <- cor.test(Method01_ctc$post, Method02_ctc$post, method="kendall")
+tau_combined <- cor.test(Method01_ctc$combined, Method02_ctc$combined, method="kendall")
+
+# Cohen's kappa for Pre- and Post-biopsy
+kappa_pre <- kappa2(cbind(Metho01_binary$pre, Method02_binary$pre))
+kappa_post <- kappa2(cbind(Metho01_binary$post, Method02_binary$post))
+kappa_combined <- kappa2(cbind(Metho01_binary$combined, Method02_binary$combined))
+
+# print results
+data.frame(
+  Statistic = c("Wilcoxon", "McNemar", "Kendall's Tau", "Cohen's Kappa"),
+  Pre = c(
+    round(wilcoxon_pre, 4),
+    round(McNemar_pre, 4),
+    paste0(round(tau_pre$estimate, 4), " (p=", round(tau_pre$p.value, 4), ")"),
+    paste0(round(kappa_pre$value, 4), " (p=", round(kappa_pre$p.value, 4), ")")),
+  Post = c(
+    round(wilcoxon_post, 4),
+    round(McNemar_post, 4),
+    paste0(round(tau_post$estimate, 4), " (p=", round(tau_post$p.value, 4), ")"),
+    paste0(round(kappa_post$value, 4), " (p=", round(kappa_post$p.value, 4), ")")),
+  Combined = c(
+    round(wilcoxon_combined, 4),
+    round(McNemar_combined, 4),
+    paste0(round(tau_combined$estimate, 4), " (p=", round(tau_combined$p.value, 4), ")"),
+    paste0(round(kappa_combined$value, 4), " (p=", round(kappa_combined$p.value, 4), ")"))) |>
+  flextable() |>
+    set_caption(caption = "Overall cases: Pre-, Post- and Combined Analysis") |>
+    autofit()
+
+
+## Method02: Prepare contingency matrices for pre and post
+# contingency_pre <- matrix(c(sum(Metho01_binary$pre == 1 & Method02_binary$pre == 1),
+#                          sum(Metho01_binary$pre == 1 & Method02_binary$pre == 0),
+#                          sum(Metho01_binary$pre == 0 & Method02_binary$pre == 1),
+#                          sum(Metho01_binary$pre == 0 & Method02_binary$pre == 0)),
+#                          nrow = 2)
+# 
+# contingency_post <- matrix(c(sum(Metho01_binary$post == 1 & Method02_binary$post == 1),
+#                          sum(Metho01_binary$post == 1 & Method02_binary$post == 0),
+#                          sum(Metho01_binary$post == 0 & Method02_binary$post == 1),
+#                          sum(Metho01_binary$post == 0 & Method02_binary$post == 0)),
+#                          nrow = 2)
+# contingency_combined <- matrix(c(sum(Metho01_binary$combined == 1 &                         #                                      Method02_binary$combined == 1),
+#                          sum(Metho01_binary$combined == 1 & Method02_binary$combined == 0),
+#                          sum(Metho01_binary$combined == 0 & Method02_binary$combined == 1),
+#                          sum(Metho01_binary$combined == 0 & Method02_binary$combined == 0)),
+#                          nrow = 2)
+```
+
+## Malignant cases:
+
+```{r}
+## Before biopsy
+summary_data <- rawdata |>
+  filter(complete == "yes" & CApositive == "yes") |>
+  select(Patient_ID, Cancer, contains("pre"), -Method01_preII) |> 
+  summarise(across(
+    starts_with("Method"),
+    list(
+      sum = ~sum(.x, na.rm = TRUE),
+      positive_cases = ~sum(.x > 0, na.rm = TRUE),
+      median = ~median(.x[.x > 0], na.rm = TRUE),  # Median for positive cases only
+      range = ~if (any(.x > 0, na.rm = TRUE)) {
+        paste0(range(.x[.x > 0], na.rm = TRUE), collapse = " - ")
+      } else {
+        NA_character_
+      }
+    ),
+    .names = "{.col}_{.fn}"  # Dynamically name columns
+  ))
+
+# Reshape the result to a long table with rows for Method01 and Method02
+summary_data %>%
+  mutate(across(everything(), as.character)) |> 
+  pivot_longer(
+    cols = everything(),
+    names_to = c("CTCs_pre_biopsy"),
+    values_to = "Value"
+  ) |> 
+# pivot_wider( names_from = CTCs_pre_biopsy,
+#             values_from = Summary) 
+  flextable() |> 
+  set_caption(caption = "Breast cancer positive: CTCs pre-Biopsy") |> 
+  set_table_properties(width = 0.8, layout = "autofit")
+
+
+## After biopsy
+summary_data <- rawdata |>  
+      filter(complete == "yes" & CApositive == "yes") |>
+      select(Patient_ID, Cancer, contains("post")) |>
+      summarise(across(
+        starts_with("Method"),
+        list(
+      sum = ~sum(.x, na.rm = TRUE),
+      positive_cases = ~sum(.x > 0, na.rm = TRUE),
+      median = ~median(.x[.x > 0], na.rm = TRUE),  # Median for positive cases only
+      range = ~if (any(.x > 0, na.rm = TRUE)) {
+        paste0(range(.x[.x > 0], na.rm = TRUE), collapse = " - ")  
+        # Range for positive cases only
+      } else {
+        NA_character_
+      }
+    ),
+    .names = "{.col}_{.fn}"  # Dynamically name columns
+  ))
+
+# Reshape the result to a long table with rows for Method01 and Method02
+summary_data %>%
+  mutate(across(everything(), as.character)) |> 
+  pivot_longer(
+    cols = everything(),
+    names_to = c("CTCs_post_biopsy"),
+    values_to = "Value"
+  ) |> 
+# pivot_wider( names_from = CTCs_pre_biopsy,
+#             values_from = Summary) 
+  flextable() |> 
+  set_caption(caption = "Breast cancer positive: CTCs post-Biopsy") |> 
+  set_table_properties(width = 0.8, layout = "autofit")
+
+## Combined: Before + After biopsy
+summary_data <- rawdata |>  
+      filter(complete == "yes" & CApositive == "yes") |>
+      mutate(Method01_combined = Method01_pre + Method01_post,
+             Method02_combined = Method02_pre + Method02_post) |> 
+      select(Patient_ID, Cancer, contains("Method"), -Method01_preII) |>
+      summarise(across(
+        contains("combined"),
+        list(
+              sum = ~sum(.x, na.rm = TRUE),
+              positive_cases = ~sum(.x > 0, na.rm = TRUE),
+              median = ~median(.x[.x > 0], na.rm = TRUE),  # Median for positive cases only
+              range = ~if (any(.x > 0, na.rm = TRUE)) {
+                paste0(range(.x[.x > 0], na.rm = TRUE), collapse = " - ")  
+                # Range for positive cases only
+              } else {
+                NA_character_
+              }
+            ),
+            .names = "{.col}_{.fn}"  # Dynamically name columns
+          ))
+
+# Reshape the result to a long table with rows for Method01 and Method02
+summary_data %>%
+  mutate(across(everything(), as.character)) |> 
+  pivot_longer(
+    cols = everything(),
+    names_to = c("Combined_CTCs"),
+    values_to = "Value"
+  ) |>
+  flextable() |> 
+  set_caption(caption = "Breast cancer positive: Combined CTCs (pre- & post-biopsy)") |> 
+  set_table_properties(width = 0.8, layout = "autofit")
+
+```
+
+## Malignant cases: Wilcoxon, McNemar, Kendall's tau, Cohen's kappa
+
+```{r}
+Method01_ctc <- list(
+  pre = rawdata |> filter(complete=="yes" & CApositive == "yes") |> pull(Method01_pre),
+  post = rawdata |> filter(complete=="yes" & CApositive == "yes") |> pull(Method01_post),
+  combined = rawdata |> 
+             filter(complete=="yes" & CApositive == "yes") |>                                          mutate(Method01_combined = Method01_pre + Method01_post) |>                               pull(Method01_combined))
+
+Method02_ctc <- list(
+  pre = rawdata |> filter(complete=="yes" & CApositive == "yes") |> pull(Method02_pre),
+  post = rawdata |> filter(complete=="yes" & CApositive == "yes") |> pull(Method02_post),
+  combined = rawdata |> 
+             filter(complete=="yes" & CApositive == "yes") |> 
+             mutate(Method02_combined = Method02_pre + Method02_post) |>                               pull(Method02_combined))
+
+## Binary outcomes (positive or negative outcome) for each method
+Metho01_binary <- list(
+  pre = ifelse(Method01_ctc$pre > 0, 1, 0),
+  post = ifelse(Method01_ctc$post > 0, 1, 0),
+  combined = ifelse(Method01_ctc$combined > 0, 1, 0))
+
+Method02_binary <- list(
+  pre = ifelse(Method02_ctc$pre > 0, 1, 0),
+  post = ifelse(Method02_ctc$post > 0, 1, 0),
+  combined = ifelse(Method02_ctc$combined > 0, 1, 0))
+
+# Ensure both datasets are paired (same number of observations)
+if (length(Metho01_binary$pre) != length(Method02_binary$pre)) {
+  stop("The data lengths for 'pre' measurements do not match!")
+}
+
+if (length(Metho01_binary$post) != length(Method02_binary$post)) {
+  stop("The data lengths for 'post' measurements do not match!")
+}
+
+if (length(Metho01_binary$combined) != length(Method02_binary$combined)) {
+  stop("The data lengths for 'post' measurements do not match!")
+}
+
+wilcoxon_pre <- wilcox.test(Method01_ctc$pre, Method02_ctc$pre, paired = TRUE, exact=FALSE)$p.value
+wilcoxon_post <- wilcox.test(Method01_ctc$post, Method02_ctc$post, paired = TRUE, exact=FALSE)$p.value
+wilcoxon_combined <- wilcox.test(Method01_ctc$combined, Method02_ctc$combined, paired = TRUE, exact=FALSE)$p.value
+
+# McNemar Test
+# prepare tables for McNemar's test
+table_pre <- table(Metho01_binary$pre, Method02_binary$pre)
+table_post <- table(Metho01_binary$post, Method02_binary$post)
+table_combined <- table(Metho01_binary$combined, Method02_binary$combined)
+
+# McNemar p-values
+McNemar_pre <- mcnemar.test(table_pre)$p.value
+McNemar_post <- mcnemar.test(table_post)$p.value
+McNemar_combined <- mcnemar.test(table_combined)$p.value
+
+# Kendall's Tau estimates: Correlation between CTC numbers
+tau_pre <- cor.test(Method01_ctc$pre, Method02_ctc$pre, method="kendall")
+tau_post <- cor.test(Method01_ctc$post, Method02_ctc$post, method="kendall")
+tau_combined <- cor.test(Method01_ctc$combined, Method02_ctc$combined, method="kendall")
+
+# Cohen's kappa for Pre- and Post-biopsy
+kappa_pre <- kappa2(cbind(Metho01_binary$pre, Method02_binary$pre))
+kappa_post <- kappa2(cbind(Metho01_binary$post, Method02_binary$post))
+kappa_combined <- kappa2(cbind(Metho01_binary$combined, Method02_binary$combined))
+
+# print results
+data.frame(
+  Statistic = c("Wilcoxon", "McNemar", "Kendall's Tau", "Cohen's Kappa"),
+  Pre = c(
+    round(wilcoxon_pre, 4),
+    round(McNemar_pre, 4),
+    paste0(round(tau_pre$estimate, 4), " (p=", round(tau_pre$p.value, 4), ")"),
+    paste0(round(kappa_pre$value, 4), " (p=", round(kappa_pre$p.value, 4), ")")),
+  Post = c(
+    round(wilcoxon_post, 4),
+    round(McNemar_post, 4),
+    paste0(round(tau_post$estimate, 4), " (p=", round(tau_post$p.value, 4), ")"),
+    paste0(round(kappa_post$value, 4), " (p=", round(kappa_post$p.value, 4), ")")),
+  Combined = c(
+    round(wilcoxon_combined, 4),
+    round(McNemar_combined, 4),
+    paste0(round(tau_combined$estimate, 4), " (p=", round(tau_combined$p.value, 4), ")"),
+    paste0(round(kappa_combined$value, 4), " (p=", round(kappa_combined$p.value, 4), ")"))) |>
+  flextable() |>
+    set_caption(caption = "Malignant cases: Pre-, Post- and Combined Analysis") |>
+    autofit()
+
+```
+
+# Table 3 and 4: Correlating data with clinical variables
+
+```{r}
+# Data preparation
+data <- rawdata |> 
+  # select relevant columns
+  filter(complete == "yes") |>
+  select(Patient_ID, Cancer, contains("Method"), -Method01_preII, Stanze_type,
+    contains(c("patho_", "_stage"))) |> 
+  
+  # Reshape data from wide to long format
+  pivot_longer(
+    cols = starts_with("Method"),
+    names_to = c("Method", "Timepoint"),
+    names_sep = "_",
+    values_to = "CTC_Count") |>
+  # rename Timepoints
+  mutate(Timepoint = recode(Timepoint,
+                            "pre" = "CTC_pre_biopsy",
+                            "post" = "CTC_post_biopsy")) |>
+  pivot_wider(names_from = Timepoint,    # Reshape data back to wide format
+              values_from = CTC_Count) |>
+  # Compute additional columns
+  mutate(CTC_total = CTC_post_biopsy + CTC_pre_biopsy,
+         CTC_delta = CTC_post_biopsy - CTC_pre_biopsy,
+         CTCchange = factor(case_when(
+           CTC_delta > 0 ~ "CTC_inc",
+           CTC_delta < 0 ~ "CTC_dec",
+           CTC_delta == 0 & CTC_total != 0 ~ "stable_pos",
+           TRUE ~ "stable_neg"),
+           levels = c("CTC_dec", "CTC_inc", "stable_pos", "stable_neg")),
+         CTCoutcome = factor(case_when(
+           CTCchange %in% c("CTC_dec", "stable_neg") ~ "fav",
+           CTCchange %in% c("CTC_inc", "stable_pos") ~ "unfav"),
+           levels = c("fav", "unfav")),
+         ER_status = factor(patho_ER, levels = c(0:12)) |>
+           fct_collapse("0" = "0", other_level = ">0"),
+         PR_status = factor(patho_PR, levels = c(0:12)) |>
+           fct_collapse("0" = "0", other_level = ">0"),
+         Ki67_status = factor(case_when(
+           patho_Ki67 <= 15 ~ "low (<=15%)",
+           patho_Ki67 > 15 ~ "high (>15%)"),
+           levels = c("low (<=15%)", "high (>15%)")),
+         'T-stage' = factor(case_when(
+           T_stage <= 2 ~ "T1+T2",
+           T_stage > 2 ~ "T3"),
+           levels = c("T1+T2", "T3")),
+         'G-stage' = factor(case_when(
+           G_stage <= 2 ~ "G1+G2",
+           G_stage > 2 ~ "G3"),
+           levels = c("G1+G2", "G3")))
+  
+# data structure
+flextable(tibble(Structure_data = capture.output(str(data)))) |> autofit()
+# head(data, n=10) |> flextable()
+
+```
+
+## Result table: Correlating CTC status to clinical variables #1
+
+```{r}
+
+table_data <- data |> 
+             filter(Method=="Method01") |>
+             filter(Cancer=="negative")
+
+variables <- c("Stanze_type","ER_status","PR_status","patho_HER2","Ki67_status",
+               "T-stage","N_stage","M_stage","G-stage",
+               "L_stage","V_stage","n_stage","R_stage")
+
+table(table_data$Stanze_type,
+      table_data$CTCoutcome)[c("Punch", "Vacuum"), , drop = FALSE] |>
+  fisher.test()
+
+# Loop through each variable and generate the result
+result_list <- lapply(variables, function(var) {
+  table(table_data[[var]], table_data$CTCoutcome) |> 
+    as.data.frame.matrix() |> 
+    rownames_to_column(var = var) |> 
+    mutate(
+      `p-value` = if_else(
+        row_number() == 1,
+        as.character(signif(fisher.test(table(table_data[[var]], 
+                                              table_data$CTCoutcome))$p.value, 4)), ""))
+  })
+
+for (i in seq_len(min(13, length(result_list)))) {
+  print(paste("Processing element", i))
+  
+  # Create and display flextable
+  result_list[[i]] |> 
+    flextable() |> 
+    print()  # Print the flextable
+}
+
+```
+
+## Result table: Correlating actual CTC counts to clinical variables #2
+
+```{r}
+# for levels 0-1 and >1
+table_data <- data |>
+  filter(Method == "Method02") |>
+  filter(Cancer=="positive") |> 
+  # for cases 0 and >0
+  # mutate(CTCpool = factor(case_when(
+  #           CTC_delta > 0 ~ "CTC_inc",
+  #           CTC_delta < 0 ~ "CTC_dec",
+  #           CTC_delta == 0 & CTC_total != 0 ~ "stable_pos",
+  #            TRUE ~ "stable_neg"),
+  #           levels = c("CTC_dec", "CTC_inc", "stable_pos", "stable_neg")),
+  #         CTCoutcome = factor(case_when(
+  #            CTCpool %in% c("stable_neg") ~ "0",
+  #            CTCpool %in% c("CTC_inc", "stable_pos", "CTC_dec") ~ "!=0"),
+  #            levels = c("0", "!=0")))
+
+  # for cases 0:1 and >1
+  mutate(CTCpool = factor(case_when(
+            CTC_delta > 1 ~ "CTC_inc",
+            CTC_delta < -1 ~ "CTC_dec",
+            CTC_delta == 0 & CTC_total == 0 ~ "stable_neg",
+             TRUE ~ "stable_pos"),
+            levels = c("CTC_dec", "CTC_inc", "stable_pos", "stable_neg")),
+          CTCoutcome = factor(case_when(
+             CTCpool %in% c("CTC_dec", "CTC_inc") ~ "unfav",
+             CTCpool %in% c("stable_pos", "stable_neg") ~ "fav"),
+             levels = c("fav", "unfav")))
+
+table(table_data$Stanze_type,
+      table_data$CTCoutcome)[c("Punch", "Vacuum"), , drop = FALSE]
+
+variables <- c("Stanze_type","ER_status","PR_status","patho_HER2","Ki67_status",
+               "T-stage","N_stage","M_stage","G-stage",
+               "L_stage","V_stage","n_stage","R_stage")
+
+# Loop through each variable and generate the result
+result_list <- lapply(variables, function(var) {
+  table(table_data[[var]], table_data$CTCoutcome) |> 
+    as.data.frame.matrix() |> 
+    rownames_to_column(var = var) |> 
+    mutate(
+      `p-value` = if_else(
+        row_number() == 1,
+        as.character(signif(fisher.test(table(table_data[[var]], 
+                                              table_data$CTCoutcome))$p.value, 4)), ""))
+  })
+
+for (i in seq_len(min(13, length(result_list)))) {
+  print(paste("Processing element", i))
+  
+  # Create and display flextable
+  result_list[[i]] |> 
+    flextable() |> 
+    print()  # Print the flextable
+}
+
+
+```
+
+# Graphical exploration
+
+```{r}
+data |>
+  filter(Method %in% c("Method01", "Method02")) |>
+  ggplot(aes(x = CTC_increase, fill = Method)) +
+  geom_density(alpha = 0.2) +
+  labs(
+    title = "Density Plot of CTC Increase by Method",
+    x = "CTC Increase",
+    y = "Density",
+    fill = "Method"
+  ) +
+  theme_minimal()
+
+# make a category with levels <= -2, -1, 0, 1, >=2 ??
+# same for actual counts?
+data <- 
+  data |>
+  mutate(CTCpre=factor(CTC_pre_biopsy,
+                       levels=0:10) |> 
+           fct_collapse("0"="0","1"="1",#"2"="2",#"3"="3",
+                        other_level=">1"),
+         CTCpost=factor(CTC_post_biopsy,
+                       levels=0:10) |> 
+           fct_collapse("0"="0","1"="1",#"2"="2",#"3"="3",
+                        other_level=">1"))
+
+table(data$Method, data$CTCpre)
+fisher.test(data$CTCpre,data$Method)
+table(data$CTCpre, data$CTCpost)
+crosstab <- 
+  data |> 
+  filter(Method=="Method01") |> 
+    group_by(CTCpre, CTCpost) |> 
+  count() |> 
+  pivot_wider(names_from=CTCpost, values_from=n) |> 
+  mutate(across(everything(),
+                ~replace_na(.x,0)))
+fisher.test(crosstab[-1])
+# crosstab2 <-
+#   matrix(c(
+#   data |> 
+#   filter(Method=="Method01") |> 
+#     pull(CTCpre) |>
+#   table(),
+#     data |> 
+#   filter(Method=="Method01") |> 
+#     pull(CTCpost) |>
+#   table()),
+#   nrow = 2,
+#   byrow=T)
+
+mcnemar.test(as.matrix(crosstab[-1]))
+# Conduct paired t-test for Method A if normality is satisfied
+if (shapiro_test_M01$p.value > 0.05) {
+  # Paired t-test for normally distributed data
+  t_test_M01 <- t.test(
+    data %>% filter(Method == "Method01") %>% pull(CTC_post_biopsy),
+    data %>% filter(Method == "Method01") %>% pull(CTC_pre_biopsy),
+    paired = TRUE
+  )
+  print(t_test_M01)
+} else {
+  # Wilcoxon signed-rank test for non-normally distributed data
+  wilcox_test_M01 <- wilcox.test(
+    data %>% filter(Method == "Method01") %>% pull(CTC_post_biopsy),
+    data %>% filter(Method == "Method01") %>% pull(CTC_pre_biopsy),
+    paired = TRUE, correct=FALSE
+  )
+  print(wilcox_test_M01)
+}
+
+# paired t-test for Method B if normality is satisfied
+if (shapiro_test_M02$p.value > 0.05) {
+  # Paired t-test for normally distributed data
+  t_test_M02 <- t.test(
+    data %>% filter(Method == "Method02") %>% pull(CTC_post_biopsy),
+    data %>% filter(Method == "Method02") %>% pull(CTC_pre_biopsy),
+    paired = TRUE
+  )
+  print(t_test_M02)
+} else {
+  # Wilcoxon signed-rank test for non-normally distributed data
+  wilcox_test_M02 <- wilcox.test(
+    data %>% filter(Method == "Method02") %>% pull(CTC_post_biopsy),
+    data %>% filter(Method == "Method02") %>% pull(CTC_pre_biopsy),
+    paired = TRUE
+  )
+  print(wilcox_test_M02)
+}
+
+```
+
+## Concordance plot
 
 ```{r}
 #reliability
 rawdata |> 
-  filter(!is.na(Method01_pre1)) |>
-group_by(Method01_pre1,Method01_pre2) |>
-  summarise(n=n()) |>
-  ggplot(aes(Method01_pre1,Method01_pre2,fill=n))+
-  geom_tile()+
-  geom_text(aes(label=n),vjust=1)+
-  theme_minimal()
-
-
-rawdata |> 
-  filter(!is.na(Method01_pre1)) |>
-  ggplot(aes(Method01_pre1,fill=Method01_pre2))+
+  filter(!is.na(Method01_pre)) |>
+  ggplot(aes(Method01_pre,fill=Method01_preII))+
   geom_bar()
 
-rawdata |> 
-  filter(!is.na(Method01_pre1)) |>
-  ggplot(aes(axis1 = Method01_pre1, axis2 = Method01_pre2)) +
-  geom_alluvium(aes(fill = Method01_pre1)) +
-  geom_stratum(width=.325, alpha=0) +
-  labs(title = "Concordance Method01 pre",
-       fill = "Method01_pre1") +
-  scale_x_continuous(name = "Replicates",
-                   breaks=1:2,
-                   labels=c("pre1","pre2"),
-                   expand = expansion(mult=.01))+
-  theme_minimal()
-
-rawdata |> 
-filter(!is.na(Method01_pre),!is.na(Method02_pre)) |>
-group_by(Method01_pre,Method02_pre) |>
-  summarise(n=n()) |>
-  ggplot(aes(Method01_pre,Method02_pre,fill=n))+
-  geom_tile()+
-  geom_text(aes(label=n),vjust=1)+
-  theme_minimal()
-rawdata |> 
-filter(!is.na(Method01_pre),!is.na(Method02_pre)) |>
-    ggplot(aes(Method01_pre,fill=Method02_pre))+
-  geom_bar()
 rawdata |> 
   filter(!is.na(Method01_pre),!is.na(Method02_pre)) |>
   ggplot(aes(Method01_pre,fill=Method02_pre))+
@@ -98,26 +1185,495 @@ scale_y_continuous("Frequency",
                    labels=scales::percent)  
 
 rawdata |> 
-  filter(!is.na(Method01_pre),
-         !is.na(Method02_pre),
-         Cancer=="positive",
-         !(Method01_pre==0 & Method02_pre==0)) |>
-  mutate(Method01_pre=factor(Method01_pre,
-                             levels=0:5),
-         Method02_pre=factor(Method02_pre,
-                             levels=0:5),
-         ) |> 
+  filter(!is.na(Method01_pre),!is.na(Method02_pre)) |>
   ggplot(aes(axis1 = Method01_pre, axis2 = Method02_pre)) +
   geom_alluvium(aes(fill = Method01_pre)) +
-  geom_stratum(width=.325, alpha=1, aes(fill=Method02_pre)) +
+  geom_stratum(width=.325, alpha=0) +
   labs(title = "Concordance Methods 01 and 02 pre",
-       fill = "CTC count") +
-  scale_fill_brewer(type = "qual", palette = 2,
-                    breaks=0:5) +
+       fill = "Method01_pre1") +
+  #scale_fill_brewer(type = "qual", palette = 2) +
   scale_x_continuous(name = "Methods",
                    breaks=1:2,
-                   labels=c("Method1","Method2"),
+                   labels=c("pre1","pre2"),
                    expand = expansion(mult=.01))+
   theme_minimal()
 ```
 
+## Count plot pre- and post-biopsy: Style 01
+
+```{r}
+complete_cases |> 
+  select(contains("Method")) |> 
+  pivot_longer(
+    cols = everything(),
+    names_to = "Measurement",
+    values_to = "Value"
+  ) |> 
+  ggplot(aes(x = Measurement, y = Value)) +
+  geom_beeswarm(alpha=.75) +
+  labs(title = "Boxplot of Measurements for Method 01 and Method 02",
+       x = "Measurement Type",
+       y = "Values") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## Count plot pre- and post-biopsy: Style 02
+
+```{r}
+data_long <- complete_cases |>
+  select(contains("Method"), -Method01_preII) |> 
+  pivot_longer(
+    cols = everything(),
+    names_to = "Measurement",
+    values_to = "Value")
+
+# Manually order the Measurement factor levels
+data_long$Measurement <- factor(
+  data_long$Measurement,
+  levels = c("Method01_pre", "Method01_post", "Method02_pre", "Method02_post", "Method03_pre", "Method03_post"))
+
+# Create the stacked bar chart with manual colors and custom order
+ggplot(data_long, aes(x = Measurement, fill = as.factor(Value))) +
+  geom_bar() +
+  scale_y_continuous(
+    breaks = c(0, 5, 10, 15, 20, 149, 150),
+    expand = c(0, 0)) +
+  scale_y_break(c(30, 149)) +
+  scale_fill_brewer(palette = "Set2") +
+  # scale_fill_manual(  values = c(
+  #     "0" = "#D3D3D3",  # Light gray for 0 values
+  #     "1" = "#1f77b4",  # Blue
+  #     "2" = "#ff7f0e",  # Orange
+  #     "3" = "#2ca02c",  # Green
+  #     "4" = "#d62728",  # Red
+  #     "5" = "#9467bd",  # Purple
+  #     "6" = "#8c564b",  # Brown
+  #     "7" = "#e377c2"  # Pink
+  #     ),
+  #   name = "Value") +
+  labs(
+    title = "Stacked Bar Chart ",
+    x = "Measurement Type",
+    y = "Count",
+    fill = "Value") +
+  geom_text(
+    stat = "count",
+    aes(label = ..count..),
+    position = position_stack(vjust = 0.04),
+    color = "black",
+    size = 3) +
+  theme_minimal() +
+  theme(
+    axis.line.y.right = element_blank(),
+    axis.text.y.right = element_blank(),
+    axis.ticks.y.right = element_blank())
+
+```
+
+## Count plot pre- and post-biopsy: Style 03
+
+```{r}
+df_long <- complete_cases |> 
+  select(Method01_pre, Method01_post) |> 
+  pivot_longer(
+    cols = everything(),
+    names_to = "Measurement",
+    values_to = "Value" ) |> 
+  group_by(Value, Measurement) |> 
+  summarise(Count = n(), .groups = 'drop')
+
+df2_long <- expand.grid(
+  Value = unique(df_long$Value),
+  Measurement = c("Method01_pre", "Method01_post")) |> 
+  left_join(df_long, by = c("Value", "Measurement")) |> 
+  replace_na(list(Count = 0))
+
+df2_long$Measurement <- factor(df2_long$Measurement, levels = c("Method01_pre", "Method01_post"))
+ggplot(df2_long, aes(x = factor(Value), y = Count, fill = Measurement)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.9)) +
+  geom_text(
+    aes(label = Count),
+    position = position_dodge(width = 0.8),
+    vjust = -0.5,
+    size = 3
+  ) +
+  labs(
+    title = "Comparison of Method01 Pre and Post Counts",
+    x = "Value",
+    y = "Count",
+    fill = "Measurement"
+  ) +
+  theme_minimal()
+
+```
+
+## Count plot pre- and post-biopsy: Style 04
+
+```{r}
+# Reshape the data to long format
+df_long <- complete_cases |> 
+  select(starts_with("Method"), -Method01_preII) |> 
+  pivot_longer(
+    cols = everything(),
+    names_to = "Measurement",
+    values_to = "Value")
+
+# Count occurrences of each value per measurement type
+df_counts <- df_long |> 
+  group_by(Value, Measurement) |> 
+  summarise(Count = n(), .groups = 'drop') |> 
+  filter(Value != 0)
+
+# Convert Measurement to factor variable for correct order on X-axis
+df_counts$Measurement <- factor(df_counts$Measurement, levels = c("Method01_pre", "Method01_post", "Method02_pre", "Method02_post"))
+
+# Create the stacked bar chart with counts displayed
+ggplot(df_counts, aes(x = Measurement, y = Value, fill= as.factor(Count))) +
+  geom_bar(stat = "identity") +
+  labs(
+    title = "Stacked Bar Chart of Value Counts per Measurement",
+    x = "Measurement Type",
+    y = "Value",
+    fill = "Count") +
+  scale_y_continuous(expand = c(0, 0)) +
+  scale_fill_brewer(palette = "Set3") +
+  theme_minimal()
+
+```
+
+## Plots suggested by Dr. A. Bushjan
+
+```{r}
+#reliability
+complete_cases |>
+  ggplot(aes(Method01_pre,fill=as.factor(Method02_pre)))+
+  geom_bar()
+
+complete_cases |>
+  ggplot(aes(axis1 = Method01_pre, axis2 = Method02_pre)) +
+  geom_alluvium(aes(fill = Method01_pre)) +
+  geom_stratum(width=.325, alpha=0) +
+  labs(title = "Concordance Method01 pre",
+       fill = "Method01_pre") +
+  scale_x_continuous(name = "Replicates",
+                   breaks=1:2,
+                   labels=c("pre1","pre2"),
+                   expand = expansion(mult=.01))+
+  theme_minimal()
+
+complete_cases |>
+  ggplot(aes(Method01_pre,fill=as.factor(Method02_pre)))+
+  geom_bar()
+
+complete_cases |>
+  ggplot(aes(Method01_pre,fill=as.factor(Method02_pre)))+
+  geom_bar(position="fill")+
+scale_y_continuous("Frequency",
+                   labels=scales::percent)  
+
+complete_cases |> 
+  ggplot(aes(axis1 = Method01_pre, axis2 = Method02_pre)) +
+  geom_alluvium(aes(fill = as.factor(Method01_pre))) +
+  geom_stratum(width=.325, alpha=0) +
+  labs(title = "Concordance Methods 01 and 02 pre",
+       fill = "Method01_pre") +
+  scale_fill_brewer(type = "qual", palette = 2) +
+  scale_x_continuous(name = "Methods",
+                   breaks=1:2,
+                   labels=c("pre1","pre2"),
+                   expand = expansion(mult=.01))+
+  theme_minimal()
+```
+
+# Plot showing the recruitment of subjects over the study period
+
+```{r}
+# cases by clinic
+rawdata %>% filter(complete=="yes") |> group_by(Clinic) %>% summarise(n())
+# plot
+rawdata |>
+  select(Date_Acrual, complete, CApositive)  |> 
+  drop_na(Date_Acrual) |>
+  #filter(complete.cases(Date_Acrual)) |>
+  filter(complete == "yes") |>
+  mutate(Individuals = seq(1:length(Date_Acrual))) |>
+  mutate(Date_Acrual = as.Date(Date_Acrual)) |>
+  ggplot(aes(x = sort(Date_Acrual), y = Individuals,
+             color=CApositive)) + 
+  geom_point(size = 2, shape = 2, alpha = 0.75) +
+  # to include the smooth curve:
+  # geom_smooth(method = 'lm', formula = y ~ poly(x, 2), color = 'red', se = FALSE) +
+  scale_x_date(labels = date_format("%m/%Y"), date_breaks = "5 month") +
+  scale_y_continuous(breaks = seq(0, 150, 20)) +
+  labs(title = "Study recruitment from 05/2020 to 10/2023",
+       x = "Timeline (month/Year)",
+       y = "Recruited subjects",
+      color = "Cancer positive") +
+  theme_bw() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),  # Center, bold
+    axis.title.x = element_text(size = 12, face = "bold", margin = margin(t = 10)),
+    axis.title.y = element_text(size = 12, face = "bold"),
+    # text = element_text(size = 12),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.ticks.x = element_line(size = 0.5)) +
+  facet_grid(rows=vars(CApositive))
+
+```
+
+# Waterfall plot for CellSeach and Parsortix
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(patchwork)
+
+# Count labeller function
+count_labeller <- function(variable, value) {
+  # Summarize counts for each Cancer group
+  counts <- data %>%
+    filter(Method == "Method02") %>%
+    group_by(Cancer) %>%
+    summarize(count = n(), .groups = "drop") |> 
+    mutate(Cancer = case_when(
+      Cancer == "positive" ~ "Cancer positive",
+      Cancer == "negative" ~ "Cancer negative"
+    )) |> 
+    slice(c(2, 1))
+  
+  # Create labels with counts
+  label_mapping <- setNames(paste0(counts$Cancer, " (n=", counts$count, ")"), counts$Cancer)
+  
+  # Return labels for the requested values
+  label_mapping[value]
+}
+
+# Prepare data for plotting
+plot_data <- data %>%
+  filter(Method == "Method02") %>%
+  mutate(CTCdelta = CTC_post_biopsy - CTC_pre_biopsy) %>%
+  mutate(
+    # Show actual counts where CTCdelta == 0 but CTC_total != 0
+    CTCdelta = ifelse(CTCdelta == 0 & CTC_total != 0, 1, CTCdelta),
+    # Set CTCdelta = 0.05 where CTC_total == 0
+    CTCdelta = ifelse(CTC_total == 0, 0.05, CTCdelta)
+  ) %>%
+  select(Patient_ID, Cancer, Method, CTC_total, CTCdelta, CTCoutcome) %>%
+  arrange(CTCdelta) %>%
+  mutate(Cancer = factor(Cancer, levels = c("positive", "negative"))) %>%
+  group_by(Cancer) %>%
+  mutate(women = row_number())
+
+# Create individual plots for each Cancer group
+plot_positive <- plot_data %>%
+  filter(Cancer == "positive") %>%
+  ggplot(aes(x = women, y = CTCdelta)) +
+  geom_bar(stat = "identity", width = 0.8) +
+  labs(y = "CTC change from baseline", x = "Recruited women") +
+  scale_x_continuous(breaks = seq(0, max(plot_data$women), by = 10)) +
+  scale_y_continuous(limits = c(-3, 6)) +  # Apply consistent Y-axis limits
+  theme_bw() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    text = element_text(size = 14),
+    plot.title = element_blank(),
+    legend.position = "none"
+  ) +
+  facet_grid(cols = vars(Cancer), labeller = count_labeller)
+
+plot_negative <- plot_data %>%
+  filter(Cancer == "negative") %>%
+  ggplot(aes(x = women, y = CTCdelta)) +
+  geom_bar(stat = "identity", width = 0.8) +
+  labs(y = NULL, x = "Recruited women") +
+  scale_x_continuous(breaks = seq(0, max(plot_data$women), by = 10)) +
+  scale_y_continuous(limits = c(-3, 6)) +  # Apply consistent Y-axis limits
+  theme_bw() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    text = element_text(size = 14),
+    plot.title = element_blank(),
+    legend.position = "none"
+  ) +
+  facet_grid(cols = vars(Cancer), labeller = count_labeller)
+
+# Combine plots with patchwork (60:40 ratio)
+combined_plot <- plot_positive + plot_negative + 
+  plot_layout(widths = c(3.3, 1.7)) +  # Set panel widths to 60:40
+  plot_annotation(
+    title = "Waterfall plot for Parsortix detected CTCs",
+    theme = theme(plot.title = element_text(hjust = 0.5, size = 16))
+  )
+
+combined_plot
+
+```
+
+# Plotting CTC dynamics
+
+```{r}
+# Create the plot dataset
+plot_data <- data |>
+  filter(Method == "Method02") |>
+  filter(Cancer=="positive") |> 
+  select(Patient_ID, Cancer, Method, CTCchange, CTC_pre_biopsy, CTC_post_biopsy) |> 
+  pivot_longer(cols = contains("CTC_"),
+              names_to = "Timepoint",
+              values_to = "CTC_count") |> 
+  group_by(Patient_ID) |>
+  filter(any(CTC_count != 0)) |>
+  ungroup() |>
+  mutate(Timepoint = factor(Timepoint, levels = c("CTC_pre_biopsy", "CTC_post_biopsy")))
+
+# Process data and include dummy panels dynamically
+panels_per_row <- 6
+
+# Add dummy Patient_IDs if needed to balance panels
+patient_ids <- unique(plot_data$Patient_ID)
+num_dummies <- ceiling(length(patient_ids) / panels_per_row) * panels_per_row - length(patient_ids)
+
+if (num_dummies > 0) {
+  dummy_ids <- paste0("Dummy_", seq_len(num_dummies))
+  dummy_data <- tibble(
+    Patient_ID = dummy_ids,
+    Cancer = NA,
+    Method = "Method02",
+    Timepoint = factor(c("CTC_pre_biopsy", "CTC_post_biopsy"), 
+                       levels = c("CTC_pre_biopsy", "CTC_post_biopsy")),
+    CTC_count = 0,
+    CTCchange = NA)
+  plot_data <- bind_rows(plot_data, dummy_data)
+  }
+
+# Ensure Patient_ID ordering includes dummy IDs and/or reverse row order
+rows <- split(patient_ids, ceiling(seq_along(patient_ids) / panels_per_row))  # Split into rows
+# ordered_ids <- unlist(rev(rows))  # Reverse rows and flatten into a single vector
+
+plot_data <- plot_data |>
+  mutate(Patient_ID = factor(Patient_ID, levels = c(patient_ids, dummy_ids)))
+  # mutate(Patient_ID = factor(Patient_ID, levels = ordered_ids))
+
+# Create the plot
+ggplot(plot_data, aes(x = Timepoint, y = CTC_count, group = Patient_ID)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black", linewidth = 0.5) + # Baseline at y = 0
+  geom_line(data = plot_data |> filter(!grepl("Dummy_", Patient_ID)), alpha = 0.5, linewidth = 0.8) + # Exclude dummy panels
+  
+  # Pre-Biopsy Timepoint - Circles
+  geom_point(
+    data = plot_data |> 
+      filter(Timepoint == "CTC_pre_biopsy" & !grepl("Dummy_", Patient_ID)),
+    aes(x = Timepoint, y = CTC_count),
+    shape = 21, size = 3, fill = "white", color = "black"
+  ) +
+  
+  # Post-Biopsy Timepoint - Based on CTC Change
+  geom_point(
+    data = plot_data |> 
+      filter(Timepoint == "CTC_post_biopsy" & !grepl("Dummy_", Patient_ID)),
+    aes(shape = CTCchange, x = Timepoint, y = CTC_count, fill = CTCchange),
+    size = 3, color = "black"
+  ) +
+  
+  scale_shape_manual(values = c(
+    "CTC_inc" = 24,   # Upward triangle
+    "CTC_dec" = 25,   # Downward triangle
+    "stable_pos" = 21   # Circle
+  )) +
+  
+  scale_fill_manual(values = c(
+    "CTC_inc" = "black",
+    "CTC_dec" = "black",
+    "stable_pos" = "white"  # Circle stays white for "no_change"
+  )) +
+  
+  scale_x_discrete(labels = c("CTC_pre_biopsy" = "pre-biopsy", 
+                              "CTC_post_biopsy" = "post-biopsy")) +
+  scale_y_continuous(breaks = seq(0, 8, by = 2), limits = c(-1, 7.5)) +
+  labs(
+    title = "Malignant cases: Parsortix CTC dynamics compared to baseline",
+    x = "Timepoint",  # Add X-axis title
+    y = "CTC count"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),  # Center, bold
+    # X-axis title
+    axis.title.x = element_text(size = 12, face = "bold", margin = margin(t = 10)),
+    axis.title.y = element_text(size = 12, face = "bold"), # Y-axis title
+    axis.text.x = element_text(size = 9, face = "bold", angle = 90, hjust = 1, vjust = 0.5),     # Smaller rotated X-axis labels
+    axis.text.y = element_text(size = 8),   # Smaller Y-axis text
+    panel.grid = element_blank(),           # Remove grid lines
+    strip.text.x = element_blank(),         # Remove panel titles
+    # strip.text.x = element_text(size = 10, face = "bold"),
+    panel.spacing.x = unit(0.01, "lines"),   # Reduce horizontal space
+    panel.spacing.y = unit(0.2, "lines"),   # Reduce vertical space
+    axis.line = element_line(linewidth = 0.25),   # Add axis lines
+    axis.line.x = element_blank(),          # Remove X-axis line
+    axis.line.y = element_line(linewidth = 0.5),   # Retain Y-axis line
+    axis.ticks.x = element_line(linewidth = 0.5), # Retain X-axis ticks
+    axis.ticks = element_line(linewidth = 0.5)   # Add axis ticks
+  ) +
+  facet_wrap(~ Patient_ID, ncol = panels_per_row)
+
+```
+
+# Image Barplot
+
+```{r}
+#CS: Ca positive
+
+df <- Ca_positive_cases %>%
+  mutate(cases = c(1:97), change = BIOP2_CS - BIOP1_CS) %>%
+  select(Patient_ID, BIOP1_CS, BIOP2_CS, Category_CS, cases, change)  #%>%
+  filter(Category_CS == "Intact"| Category_CS == "Questionable" | Category_CS == "CEC_neg")
+
+
+df_long <- pivot_longer(df, cols = starts_with("BIOP"), names_to = "time_point", values_to = "count" )
+df_long<- df_long %>% mutate(count= ifelse(count==0, 0.07, count))
+selected_labels <- c(1, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100)
+
+ggplot(df_long, aes(x= reorder(as.factor(cases), change),
+                    y = count* ((-1)^(time_point == "BIOP2_CS")),
+                    fill = as.factor(time_point))) +
+  geom_bar(stat = "identity")  +
+  labs(title = "Malignant (n=97)", x = "Recruited women", y = "CTC count",
+       fill= "CTC detected") +
+  theme_bw() +
+  theme(panel.grid.minor.y = element_blank()) +
+  theme(text=element_text(size=13), plot.title = element_text(hjust = 0.5), axis.ticks.x = element_blank()) +
+  #scale_x_discrete(labels=as.factor(seq(1,94))) +
+  scale_x_discrete(labels = ifelse(df$cases %in% selected_labels, as.character(df$cases), "")) +
+  scale_fill_manual(values = c("BIOP1_CS" = "#F8766D", "BIOP2_CS" = "#00BFC4" ),
+                    labels = c("pre biopsy", "post biopsy"))+
+  scale_y_continuous(limits=c(-3.5, 7.5), breaks=seq(-4,7,by=1))
+
+
+#CS: Ca negative
+df <- Ca_negative_cases %>%
+  mutate(cases = c(1:50), change = BIOP2_CS - BIOP1_CS) %>%
+  select(Patient_ID, BIOP1_CS, BIOP2_CS, Category_CS, cases, change)  #%>%
+  #filter(Category_CS == "Intact"| Category_CS == "Questionable" | Category_CS == "CEC_neg")
+
+
+df_long <- pivot_longer(df, cols = starts_with("BIOP"), names_to = "time_point", values_to = "count" )
+df_long<- df_long %>% mutate(count= ifelse(count==0, 0.07, count))
+selected_labels <- c(1, 10, 20, 30, 40, 50)
+ggplot(df_long, aes(x= reorder(as.factor(cases), change),
+                    y = count* ((-1)^(time_point == "BIOP1_CS")),
+                    fill = as.factor(time_point))) +
+  geom_bar(stat = "identity")  +
+  labs(title = "Benign (n=50)", x = "Recruited women", y = "CTC count",
+       fill= "CTC detected") +
+  theme_bw() +
+  theme(panel.grid.minor.y = element_blank()) +
+  theme(text=element_text(size=11), plot.title = element_text(hjust = 0.5), axis.ticks.x = element_blank()) +
+  #scale_x_discrete(labels=as.factor(seq(1,93))) +
+  scale_x_discrete(labels = ifelse(df$cases %in% selected_labels, as.character(df$cases), "")) +
+  scale_fill_manual(values = c("BIOP2_CS" = "#00BFC4", "BIOP1_CS" = "#F8766D" ),
+                    labels = c("post biopsy", "pre biopsy"))+
+  scale_y_continuous(limits=c(-3.5, 7.5), breaks=seq(-3.5,7,by=1))
+
+
+```
