@@ -33,8 +33,9 @@ conflicts_prefer(readxl::read_xlsx)
 # Importing data
 
 ```{r}
-biopsydata <- read_xlsx("Data/CTCanalysis_NK.xlsx")
-baselinedata <- read_xlsx("Data/CTCanalysis_NK.xlsx", sheet = 2)
+biopsydata <- read_xlsx(here("Data/CTCanalysis_NK.xlsx"))
+baselinedata <- read_xlsx(here("Data/CTCanalysis_NK.xlsx"), 
+                               sheet = 2)
 qualvars <- ColSeeker(biopsydata,
                      namepattern=c("^C","meno","Stanze","Ne"))
 ```
@@ -985,30 +986,43 @@ variables <- c("Stanze_type","ER_status","PR_status","patho_HER2","Ki67_status",
                "T-stage","N_stage","M_stage","G-stage",
                "L_stage","V_stage","n_stage","R_stage")
 
-table(table_data$Stanze_type,
-      table_data$CTCoutcome)[c("Punch", "Vacuum"), , drop = FALSE] |>
-  fisher.test()
+table_data |> 
+  filter(Stanze_type != "Not_received") |>
+  mutate(Stanze_type = fct_drop(Stanze_type)) |> 
+  compare2qualvars(dep_vars = "CTCoutcome",
+                   indep_var = "Stanze_type") |> 
+  flextable() |> 
+  bg(~p!="",1:5,bg = 'lightgrey')
+# table(table_data$Stanze_type,
+#       table_data$CTCoutcome)[c("Punch", "Vacuum") , drop = FALSE] |>
+#   fisher.test()
 
 # Loop through each variable and generate the result
-result_list <- lapply(variables, function(var) {
-  table(table_data[[var]], table_data$CTCoutcome) |> 
-    as.data.frame.matrix() |> 
-    rownames_to_column(var = var) |> 
-    mutate(
-      `p-value` = if_else(
-        row_number() == 1,
-        as.character(signif(fisher.test(table(table_data[[var]], 
-                                              table_data$CTCoutcome))$p.value, 4)), ""))
-  })
+table_data |> 
+  compare2qualvars(dep_vars = variables[-12],
+                   indep_var = "CTCoutcome") |> 
+  flextable()|> 
+  bg(~p!=" ",1:5,bg = 'lightgrey') |> 
+  align(~p==" ",1,align = "right")
+# result_list <- lapply(variables, function(var) {
+#   table(table_data[[var]], table_data$CTCoutcome) |> 
+#     as.data.frame.matrix() |> 
+#     rownames_to_column(var = var) |> 
+#     mutate(
+#       `p-value` = if_else(
+#         row_number() == 1,
+#         as.character(signif(fisher.test(table(table_data[[var]], 
+#                                               table_data$CTCoutcome))$p.value, 4)), ""))
+#   })
 
-for (i in seq_len(min(13, length(result_list)))) {
-  print(paste("Processing element", i))
-  
-  # Create and display flextable
-  result_list[[i]] |> 
-    flextable() |> 
-    print()  # Print the flextable
-}
+# for (i in seq_len(min(13, length(result_list)))) {
+#   print(paste("Processing element", i))
+#   
+#   # Create and display flextable
+#   result_list[[i]] |> 
+#     flextable() |> 
+#     print()  # Print the flextable
+# }
 
 ```
 
@@ -1048,7 +1062,8 @@ table(table_data$Stanze_type,
 
 variables <- c("Stanze_type","ER_status","PR_status","patho_HER2","Ki67_status",
                "T-stage","N_stage","M_stage","G-stage",
-               "L_stage","V_stage","n_stage","R_stage")
+               "L_stage","V_stage",#"n_stage",
+               "R_stage")
 
 # Loop through each variable and generate the result
 result_list <- lapply(variables, function(var) {
