@@ -35,7 +35,9 @@ pacman::p_load(conflicted,
                tau,                # For Kendall's tau
                tidyverse,
                vcd,                # For McNemar test
-               wrappedtools)
+               wrappedtools,
+               lme4,
+               broom, broom.mixed)
 
 conflicts_prefer(dplyr::filter)
 conflicts_prefer(formattable::comma)
@@ -87,6 +89,7 @@ rawdata <-
   )
 
 ```
+
 ## Mutating Staging column
 
 ```{r}
@@ -149,6 +152,7 @@ bind_rows(
 # Table 1 : Clinicopathological parameters
 
 ```{r}
+#| fig.height: 4
 # Age plot
 rawdata |>
   filter(complete=="yes") |>
@@ -162,7 +166,8 @@ rawdata |>
   filter(complete == "yes") |>
   group_by(Cancer) |> 
   summarise(cases = n(),
-            shapiro_pvalue = shapiro.test(Age)$p.value)
+            shapiro_pvalue = shapiro.test(Age)$p.value) |> 
+  flextable()
 
 ## Wilcoxon test
 rawdata |> 
@@ -181,7 +186,8 @@ rawdata |>
     shapiro_CTCs_Method01 = shapiro.test(unlist(Method01))$p.value,
     shapiro_CTCs_Method02 = shapiro.test(unlist(Method02))$p.value,
     wilcox_pvalue = wilcox.test(unlist(Method01), unlist(Method02), exact = FALSE)$p.value
-  )
+  )|> 
+  flextable()
 
 # CTC counts before biopsy
 rawdata |> 
@@ -193,7 +199,8 @@ rawdata |>
       contains("Method"),
       ~ sum(.x, na.rm = TRUE),
       .names = "{.col}_sum"
-    ))
+    ))|> 
+  flextable()
 
 # Clinical variables
 # Initialize a list to store results
@@ -271,7 +278,8 @@ rawdata |>
   summarise(
     Cases = n()) |> 
   ungroup() |> 
-  mutate(Percentage = (Cases / sum(Cases)) * 100)
+  mutate(Percentage = (Cases / sum(Cases)) * 100)|> 
+  flextable()
 
 rawdata |> 
   filter(complete=="yes", Cancer=="negative") |> 
@@ -287,7 +295,8 @@ rawdata |>
   summarise(
     Cases = n()) |> 
   ungroup() |> 
-  mutate(Percentage = (Cases / sum(Cases)) * 100)
+  mutate(Percentage = (Cases / sum(Cases)) * 100)|> 
+  flextable()
 
 # Calculating Table 1 values for ER, PR, HER2, Ki67%
 # ER_status
@@ -393,7 +402,8 @@ rawdata |>
   group_by(Subtype, Cancer) |> 
   summarise(Cases = n()) |> 
   ungroup() |> 
-  mutate(Percentage = (Cases / sum(Cases)) * 100)
+  mutate(Percentage = (Cases / sum(Cases)) * 100)|> 
+  flextable()
 
 # Staging: T, N, Metastasis
 table$T_stage <- rawdata |> 
@@ -604,6 +614,7 @@ flextable() |> set_table_properties(width = 0.9, layout = "autofit") |>
 ```
 
 ## Overall CTC+ cases: Wilcoxon, McNemar, Kendall's tau, Cohen's kappa
+
 ```{r}
 # Example data from the table
 Method01_ctc <- list(
@@ -870,6 +881,7 @@ head(data, n=10) |> flextable()
 ```
 
 ## Result table
+
 ```{r}
 variables <- c("Stanze_type","ER_status","PR_status","patho_HER2",
                "Ki67_status", "T-stage","N_stage","M_stage","G-stage",
@@ -917,6 +929,7 @@ data |>
   bold(part = "header")
 
 ```
+
 # Table 6 and 7: Univariable analysis on cases identified with CTCs
 
 ```{r}
@@ -1199,5 +1212,48 @@ ggplot(plot_data, aes(x = Timepoint, y = CTC_count, group = Patient_ID)) +
     axis.ticks = element_line(linewidth = 0.5)   # Add axis ticks
   ) +
   facet_wrap(~ Patient_ID, ncol = panels_per_row)
+
+```
+
+# Poisson mixed effect model
+
+```{r}
+#overview of extraction methods
+
+methods(class="merMod")
+
+modeldata_m01_prepost <- 
+  rawdata |> 
+  filter(!is.na(Cancer)) |> 
+  select(Patient_ID,Cancer,Method01_pre,Method01_post) |> 
+  pivot_longer(starts_with("Meth"),
+               names_to="Time",
+               values_to = "Count") |> 
+  mutate(Time=str_remove(Time,"Method01_"))
+ggplot(modeldata_m01_prepost,
+       aes(Count, fill = Time))+
+  geom_histogram(position="dodge")+
+  facet_grid(rows = vars(Cancer))
+model_out <- glmer(Count ~ Time * Cancer + (1|Patient_ID), 
+                   family = poisson, 
+                   data = modeldata_m01_prepost)
+tidy(model_out)|> 
+  mutate(across(estimate:statistic, roundR),
+         p.value=formatP(p.value,3,mark=T)) |> 
+  flextable()
+
+model_summary <- summary(model_out)
+model_summary
+model_summary$coefficients
+
+model_parameter <- exp(fixef(model_out))
+
+model_confint <- exp(confint(model_out))
+
+confint(model, method="profile", devtol=1e-4)
+
+confint(model, method="Wald")
+
+
 
 ```
