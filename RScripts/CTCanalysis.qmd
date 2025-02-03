@@ -37,7 +37,8 @@ pacman::p_load(conflicted,
                vcd,                # For McNemar test
                wrappedtools,
                lme4,
-               broom, broom.mixed)
+               broom, broom.mixed,
+               ordinal)
 
 conflicts_prefer(dplyr::filter)
 conflicts_prefer(formattable::comma)
@@ -1224,12 +1225,14 @@ methods(class="merMod")
 
 modeldata_m01_prepost <- 
   rawdata |> 
-  filter(!is.na(Cancer)) |> 
+  # filter(!is.na(Cancer)) |> 
   select(Patient_ID,Cancer,Method01_pre,Method01_post) |> 
   pivot_longer(starts_with("Meth"),
                names_to="Time",
                values_to = "Count") |> 
-  mutate(Time=str_remove(Time,"Method01_"))
+  mutate(Time=str_remove(Time,"Method01_") |> 
+           factor(levels=c("pre","post"))) |> 
+  drop_na()
 ggplot(modeldata_m01_prepost,
        aes(Count, fill = Time))+
   geom_histogram(position="dodge")+
@@ -1256,4 +1259,30 @@ confint(model, method="Wald")
 
 
 
+```
+
+# Ordinal analysis with cumulative link mixed effect models
+
+```{r}
+clmm_model <- clmm(factor(Count) ~ Time * Cancer + (1|Patient_ID), 
+                   threshold = 'equidistant',
+                   data = modeldata_m01_prepost)
+
+reduced_model_i <- clmm(factor(Count) ~ Time + Cancer + (1|Patient_ID), 
+                   threshold = 'equidistant',
+                   data = modeldata_m01_prepost)
+anova(reduced_model_i, clmm_model)
+
+
+reduced_model_c <- clmm(factor(Count) ~ Time + (1|Patient_ID), 
+                   threshold = 'equidistant',
+                   data = modeldata_m01_prepost)
+anova(reduced_model_c, reduced_model_i, clmm_model)
+
+summary(clmm_model)
+confint(clmm_model) |> exp()
+tidy(clmm_model)|> 
+  mutate(across(estimate:statistic, roundR),
+         p.value=formatP(p.value,3,mark=T)) |> 
+  flextable()
 ```
