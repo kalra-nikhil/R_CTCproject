@@ -1,0 +1,151 @@
+# Bland-Altman plot
+```{r}
+#| eval: false
+# Prepare data
+df_valid <- rawdata_wide %>%
+  filter(!is.na(Method01_pre) & !is.na(Method01_preII)) %>%
+  mutate(
+    mean_ctc = (Method01_pre + Method01_preII) / 2,
+    diff_ctc = Method01_pre - Method01_preII
+  )
+
+# Median of differences
+median_diff <- median(df_valid$diff_ctc)
+
+# Bootstrapped 95% CI for the median
+median_boot <- function(data, indices) median(data[indices])
+boot_out_median <- boot(df_valid$diff_ctc, statistic = median_boot, R = 10000)
+ci_median <- boot.ci(boot_out_median, type = "perc")$percent[4:5]
+
+# Bootstrapped LoA (2.5th and 97.5th percentiles)
+loa_boot <- function(data, indices) {
+  sample <- data[indices]
+  quantile(sample, probs = c(0.025, 0.975))
+}
+boot_out_loa <- boot(df_valid$diff_ctc, statistic = loa_boot, R = 10000)
+ci_loa_lower <- boot.ci(boot_out_loa, index = 1, type = "perc")$percent[4:5]
+ci_loa_upper <- boot.ci(boot_out_loa, index = 2, type = "perc")$percent[4:5]
+
+# Safe fallback for visibility if CI is zero-width
+loa_lower_max <- ifelse(ci_loa_lower[1] == ci_loa_lower[2],
+                        ci_loa_lower[2] + 0.01, ci_loa_lower[2])
+loa_upper_max <- ifelse(ci_loa_upper[1] == ci_loa_upper[2],
+                        ci_loa_upper[2] + 0.01, ci_loa_upper[2])
+
+# Actual LoA estimates
+loa <- quantile(df_valid$diff_ctc, probs = c(0.025, 0.975))
+
+# % within LoA
+n_total <- nrow(df_valid)
+n_within_loa <- sum(df_valid$diff_ctc >= loa[1] & df_valid$diff_ctc <= loa[2])
+percent_within_loa <- round(100 * n_within_loa / n_total, 2)
+
+# Jitter overlapping points
+set.seed(100)
+df_valid <- df_valid %>%
+  group_by(mean_ctc, diff_ctc) %>%
+  mutate(
+    point_id = row_number(),
+    jittered_mean = case_when(
+      mean_ctc == 0.0 & diff_ctc == 0.0     ~ mean_ctc + runif(n(), -0.1, 0.1),
+      mean_ctc == 0.5 & diff_ctc == 1.0     ~ mean_ctc + runif(n(), -0.02, 0.02),
+      mean_ctc == 0.5 & diff_ctc == -1.0    ~ mean_ctc + runif(n(), -0.02, 0.02),
+      TRUE                                  ~ mean_ctc
+    ),
+    jittered_diff = case_when(
+      mean_ctc == 0.0 & diff_ctc == 0.0     ~ diff_ctc + runif(n(), -0.05, 0.05),
+      mean_ctc == 0.5 & diff_ctc == 1.0     ~ diff_ctc + runif(n(), -0.02, 0.02),
+      mean_ctc == 0.5 & diff_ctc == -1.0    ~ diff_ctc + runif(n(), -0.02, 0.02),
+      TRUE                                  ~ diff_ctc
+    )
+  ) %>%
+  ungroup()
+
+# Count annotations
+df_counts <- df_valid %>%
+  group_by(mean_ctc, diff_ctc) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  mutate(label = paste0("n = ", n))
+
+# Plot
+p <- ggplot(df_valid, aes(x = jittered_mean, y = jittered_diff)) +
+  scale_y_continuous(limits = c(-1.5, 1.5), breaks = seq(-1.5, 1.5, 0.5)) +
+  
+  # Data points and counts
+  geom_point(color = "blue", size = 2, alpha = 0.5) +
+  geom_text(data = df_counts,
+            aes(x = mean_ctc, y = diff_ctc, label = label),
+            inherit.aes = FALSE,
+            color = "blue", vjust = -1, size = 4) +
+
+  # Shaded Bootstrapped CI bands for LoA
+  # annotate("rect", xmin = -Inf, xmax = Inf,
+  #          ymin = ci_loa_lower[1], ymax = loa_lower_max,
+  #          fill = "red", alpha = 0.1) +
+  # annotate("rect", xmin = -Inf, xmax = Inf,
+  #          ymin = ci_loa_upper[1], ymax = loa_upper_max,
+  #          fill = "red", alpha = 0.1) +
+
+  # Horizontal lines: Median and LoA
+  geom_hline(yintercept = median_diff, color = "black", linetype = "dashed", linewidth = 1, alpha = 0.5) +
+  geom_hline(yintercept = loa[1], color = "red", linetype = "dashed", linewidth = 1, alpha = 0.5) +
+  geom_hline(yintercept = loa[2], color = "red", linetype = "dashed", linewidth = 1, alpha = 0.5) +
+
+  # Annotations
+  annotate("text", x = max(df_valid$jittered_mean), y = loa[1] - 0.2,
+           label = paste0("Lower LoA: ", round(loa[1], 2),
+                          " [", round(ci_loa_lower[1], 2), ", ", round(ci_loa_lower[2], 2), "]"),
+           hjust = 1, vjust = 0, color = "red") +
+  annotate("text", x = max(df_valid$jittered_mean), y = loa[2] + 0.2,
+           label = paste0("Upper LoA: ", round(loa[2], 2),
+                          " [", round(ci_loa_upper[1], 2), ", ", round(ci_loa_upper[2], 2), "]"),
+           hjust = 1, vjust = 1, color = "red") +
+  annotate("text", x = median(df_valid$jittered_mean), y = median_diff + 0.25,
+           label = paste0("Median = ", round(median_diff, 2)),
+           hjust = -2, vjust = 1, color = "black", size = 4) +
+  annotate("text", x = Inf, y = -1.5,
+           label = "IQR = [0,0]; 95% CI of median = [0,0]",
+           hjust = 1.05, vjust = 0, color = "black", size = 4) +
+
+  # Labels
+  labs(
+    title = "Bland-Altman Plot (Median Difference with Bootstrapped 95% CI & LoA)",
+    subtitle = paste0(percent_within_loa, "% of differences within Limits of Agreement"),
+    x = "Average CTC count",
+    y = expression(Difference~"("~CTC[1]~"–"~CTC[2]~")")
+  ) +
+
+  # Theme with enforced axis labels
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text( size = 12, margin = margin(t = 5, b = 10)),
+    axis.title.y = element_text(color = "black", size = 12, margin = margin(r = 5)),
+    axis.title.x = element_text(color = "black", size = 12, margin = margin(t = 10)),
+    axis.text.y = element_text(color = "black"),
+    axis.text.x = element_text(color = "black"),
+    axis.line.y = element_line(color = "black"),
+    axis.line.x = element_line(color = "black"),
+    axis.ticks.y = element_line(color = "black"),
+    axis.ticks.x = element_line(color = "black")
+  )
+
+# Show plot
+png("p.png", width = 2400, height = 1300, res = 300)
+print(p)
+dev.off()
+
+
+# ggsave("bland_altman_ctc_plot.emf", plot = p, width = 7.3, height = 5, units = "in")
+# ggsave("bland_altman_ctc_plot.png", plot = p, width = 7.3, height = 5, units = "in", dpi = 300)
+
+rm(
+  df_valid, df_counts,
+  median_diff, median_boot, boot_out_median, ci_median,
+  loa_boot, boot_out_loa, ci_loa_lower, ci_loa_upper,
+  loa_lower_max, loa_upper_max,
+  loa, n_total, n_within_loa, percent_within_loa,
+  p
+)
+
+```

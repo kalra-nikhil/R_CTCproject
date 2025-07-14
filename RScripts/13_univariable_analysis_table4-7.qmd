@@ -1,0 +1,189 @@
+# Table 4 and 5: Univariable analysis (Fisher’s exact test) on favorable and unfavorable outcomes
+```{r}
+#| eval: false
+fact_vars <- ColSeeker(rawdata_wide, namepattern = c("Cancer", "Menopause", "Stanze_type", "_f"))
+
+generate_flextable <- function(data, outcome_var, title_text, filter_expr = NULL) {
+  if (!is.null(filter_expr)) {
+    data <- data |> filter(!!parse_expr(filter_expr))
+  }
+  data <- data %>%
+          mutate(
+              Menopause = recode(
+                  Menopause,
+                  "premenopausal"  = "pre/perimenopausal",
+                  "perimenopausal" = "pre/perimenopausal"
+              ),
+              
+              N_stage_f = recode(
+                  N_stage_f,
+                  "N0" = "N0/Nx",
+                  "Nx" = "N0/Nx"
+              ),
+              
+              M_stage_f = recode(
+                  M_stage_f,
+                  "M0" = "M0/Mx",
+                  "Mx" = "M0/Mx"
+              ),
+              
+              T_stage_f = recode(
+                  T_stage_f,
+                  "T1+T2" = "Tis/T1+T2",
+                  "Tis"    = "Tis/T1+T2"
+              )
+          )
+  
+  data |> 
+    select(Patient_ID, all_of(fact_vars$names), all_of(outcome_var)) |> 
+    compare2qualvars(dep_vars = fact_vars$names, indep_var = outcome_var) |> 
+    # mutate(p = signif(as.numeric(p), digits = 6)) |>  # keep p-values numeric with 4 sig digits
+    flextable() |> 
+    padding(~p == " ", padding.left = 20) |> 
+    bg(~p != " ", bg = "grey90") |> 
+    set_table_properties(width = 1, layout = "autofit") |> 
+    bg(~p != " ", 1:5, bg = 'lightgrey') |> 
+    align(~p == " ", 1, align = "left") |> 
+    add_header_row(values = title_text, colwidths = 5) |> 
+    bold(part = "header") |> 
+    print(preview = "html")
+}
+
+
+# Define combinations of outcome variable, title, and optional filter
+analyses <- list(
+    list("CTCoutcome_m01", 
+         "Univariable analysis (Fisher’s exact test) on fav- & unfavorable CTC outcomes\n(overall cases, n=149)", 
+         NULL),
+    list("CTCoutcome_m02",
+         "Univariable analysis (Fisher’s exact test) on fav- & unfavorable CTC outcomes\n(overall cases, n=149)", 
+         NULL),
+    list("CTCoutcome_combined", 
+         "Univariable analysis (Fisher’s exact test) on fav- & unfavorable CTC outcomes\n(overall cases, n=149)", 
+         NULL),
+    list("CTCoutcome_m01", 
+         "Univariable analysis (Fisher’s exact test) on fav- & unfavorable CTC outcomes (cancer-positive only)", 
+         "Cancer == 'positive'"),
+    list("CTCoutcome_m02", 
+         "Univariable analysis (Fisher’s exact test) on fav- & unfavorable CTC outcomes (cancer-positive only)", 
+         "Cancer == 'positive'"),
+    list("CTCoutcome_combined", 
+         "Univariable analysis (Fisher’s exact test) on fav- & unfavorable CTC outcomes (cancer-positive only)", 
+         "Cancer == 'positive'")
+)
+
+# Execute and display tables
+walk(analyses, ~ generate_flextable(rawdata_wide, .x[[1]], .x[[2]], .x[[3]]))
+
+rm(fact_vars, analyses)
+
+```
+
+# Table 6 and 7: Univariable analysis on cases identified with CTCs
+```{r}
+#| eval: false
+fact_vars <- ColSeeker(data, namepattern = c("Cancer", "Menopause", "Stanze_type", "_f"))
+
+# Malignant cases with 0 or >0 CTCs, including merged group levels
+data |>
+  # filter(Method == "Method01") |>
+  filter(Method == "Method02") |>
+  filter(Cancer == "positive") |>
+  pivot_wider(names_from = "Timepoint",
+              values_from = "CTC_count") |> 
+  mutate(CTC_sum = pre_biopsy + post_biopsy) |>
+  mutate(CTC_group = factor(case_when(
+    CTC_sum == 0  ~ "0",
+    CTC_sum > 0  ~ ">0"),
+    levels = c("0", ">0")),
+  # mutate(
+  #   CTCoutcome = factor(case_when(
+  #     CTCchange_m02 %in% c("stable_neg") ~ "0",
+  #     CTCchange_m02 %in% c("CTC_inc", "stable_pos", "CTC_dec") ~ ">0"),
+  #     levels = c("0", ">0")),
+    
+    # Recode Menopause levels
+    Menopause = recode(Menopause,
+                       "premenopausal" = "pre/perimenopausal",
+                       "perimenopausal" = "pre/perimenopausal"),
+
+    # Recode N stage
+    N_stage_f = recode(N_stage_f,
+                       "N0" = "N0/Nx",
+                       "Nx" = "N0/Nx"),
+
+    # Recode M stage
+    M_stage_f = recode(M_stage_f,
+                       "M0" = "M0/Mx",
+                       "Mx" = "M0/Mx"),
+
+    # Recode T stage
+    T_stage_f = recode(T_stage_f,
+                       "T1+T2" = "Tis/T1+T2",
+                       "Tis" = "Tis/T1+T2")
+  ) |>
+  compare_n_qualvars(dep_vars = fact_vars$names,
+                     indep_var = "CTC_group") |>
+  rename("0" = "desc0", ">0" = "desc>0") |>
+  flextable() |>
+  autofit() |>
+  bg(~p != " ", 1:5, bg = 'lightgrey') |>
+  align(~p == " ", 1, align = "center") |>
+  add_header_row(
+    values = "Univariable analysis on cases identified with 0 or >0 CTCs\n(Malignant cases, n=94)",
+    colwidths = 5) |>
+  bold(part = "header")
+
+
+# Overall cases with 0:1 or >1 CTC
+data |>
+  # filter(Method == "Method01") |>
+   filter(Method == "Method02") |>
+  filter(Cancer == "positive") |>
+  pivot_wider(names_from = "Timepoint", values_from = "CTC_count") |>
+  mutate(
+    CTC_sum = pre_biopsy + post_biopsy,
+    CTC_group = factor(case_when(
+      CTC_sum %in% c(0, 1) ~ "0-1",
+      CTC_sum > 1 ~ ">1"), 
+      levels = c("0-1", ">1")),
+
+    # Recode Menopause levels
+    Menopause = recode(Menopause,
+                       "premenopausal" = "pre/perimenopausal",
+                       "perimenopausal" = "pre/perimenopausal"),
+
+    # Recode N stage
+    N_stage_f = recode(N_stage_f,
+                       "N0" = "N0/Nx",
+                       "Nx" = "N0/Nx"),
+
+    # Recode M stage
+    M_stage_f = recode(M_stage_f,
+                       "M0" = "M0/Mx",
+                       "Mx" = "M0/Mx"),
+
+    # Recode T stage
+    T_stage_f = recode(T_stage_f,
+                       "T1+T2" = "Tis/T1+T2",
+                       "Tis" = "Tis/T1+T2")
+  ) |>
+  compare_n_qualvars(dep_vars = fact_vars$names,
+                     indep_var = "CTC_group") |>
+  rename("0-1" = "desc0-1", ">1" = "desc>1") |>
+  flextable() |>
+  autofit() |>
+  bg(~p != " ", 1:5, bg = 'lightgrey') |>
+  align(~p == " ", 1, align = "center") |>
+  add_header_row(
+    values = "Univariable analysis on cases identified with 0–1 vs >1 CTCs\n(Malignant cases, Method01)",
+    colwidths = 5) |>
+  bold(part = "header")
+
+# custom_order <- c("Cancer", "Menopause", "Stanze_type", "patho_ER_f", "patho_PR_f", "patho_HER2_f", "patho_Ki67_f",
+#                   "T_stage_f", "N_stage_f", "M_stage_f", "G_stage_f", "L_stage_f",
+#                   "V_stage_f", "n_stage_f", "R_stage_f")
+
+rm(fact_vars)
+
+```

@@ -1,0 +1,185 @@
+# Plotting CTC distribution
+```{r}
+#| eval: false
+
+data |>
+    select(Patient_ID, Method, Timepoint, CTC_count) |>
+    group_by(Method, Timepoint) %>%
+    summarise(
+        N_subjects = n(),
+        Total_CTCs = sum(CTC_count, na.rm = TRUE),
+        Mean_CTCs = mean(CTC_count, na.rm = TRUE),
+        Median_CTCs = median(CTC_count, na.rm = TRUE),
+        .groups = "drop"
+    )
+
+# Bar plot (Cancer removed)
+distribution_plot <- data |>
+    mutate(
+        CTC_count = factor(CTC_count, levels = as.character(0:7)),
+        Timepoint = recode(Timepoint,
+                           "pre_biopsy" = "pre-biopsy",
+                           "post_biopsy" = "post-biopsy"),
+        Timepoint = factor(Timepoint, levels = c("pre-biopsy", "post-biopsy")),
+        Method = recode(Method,
+                        "Method01" = "CellSearch",
+                        "Method02" = "Parsortix")
+    ) |>
+    count(Method, Timepoint, CTC_count, .drop = FALSE) |>
+    ggplot(aes(x = CTC_count, y = n, fill = Timepoint)) +
+    geom_col(position = position_dodge(width = 0.9), color = "black", width = 0.9, alpha = 0.8) +
+
+    facet_grid(rows = vars(Method)) +
+    scale_fill_manual(values = c("pre-biopsy" = "#619CFF", "post-biopsy" = "#F8766D")) +
+    scale_x_discrete(name = "CTC counts", drop = FALSE) +
+    scale_y_continuous(name = "Number of subjects", breaks = seq(0, 140, by = 20)) +
+
+    theme_bw() +
+    theme(
+        legend.position = "top",
+        legend.text = element_text(size = 11),
+        legend.margin = margin(t = 0, r = 0, b = -5, l = 0),
+        strip.text.x = element_text(size = 11, face = "bold"),
+        strip.text.y = element_text(size = 11, face = "bold"),
+        axis.title = element_text(size = 12),
+        axis.title.x = element_text(margin = margin(t = 5)),
+        axis.title.y = element_text(margin = margin(r = 5)),
+        plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+        panel.grid.major = element_line(color = "grey85", size = 0.5),
+        panel.grid.minor = element_blank()
+    ) +
+    labs(
+        fill = "Timepoint",
+        title = "CTC count distribution by Enrichment Methods and Timepoint"
+    )
+
+png("distribution_plot.png", width = 2400, height = 1700, res = 300)
+print(distribution_plot)
+dev.off()
+
+
+# 
+# 
+# data |>
+#     select(Patient_ID, Cancer, Method, Timepoint, CTC_count) |>
+#     group_by(Cancer, Method, Timepoint) %>%
+#     summarise(
+#         N_subjects = n(),
+#         Total_CTCs = sum(CTC_count, na.rm = TRUE),
+#         Mean_CTCs = mean(CTC_count, na.rm = TRUE),
+#         Median_CTCs = median(CTC_count, na.rm = TRUE),
+#         .groups = "drop"
+#     )
+# 
+# # Bar plot
+# data |>
+#     mutate(
+#         CTC_count = factor(CTC_count, levels = as.character(0:7)),
+#         Timepoint = factor(Timepoint, levels = c("pre_biopsy", "post_biopsy")),
+#         Method = recode(Method,
+#                         "Method01" = "CellSearch",
+#                         "Method02" = "Parsortix")
+#     ) |>
+#     count(Method, Cancer, Timepoint, CTC_count, .drop = FALSE) |>
+#     ggplot(aes(x = CTC_count, y = n, fill = Timepoint)) +
+#     geom_col(position = position_dodge(width = 0.9), color = "black", width = 0.9, alpha = 0.8) +
+#     
+#     facet_grid(
+#         rows = vars(Method), cols = vars(Cancer),
+#         labeller = labeller(
+#             Cancer = c("positive" = "Malignant", "negative" = "Benign")
+#         )
+#     ) +
+#     
+#     scale_fill_manual(values = c("pre_biopsy" = "#619CFF", "post_biopsy" = "#F8766D")) +
+#     scale_x_discrete(name = "CTC counts", drop = FALSE) +
+#     scale_y_continuous(name = "Number of subjects", breaks = seq(0, 100, by = 20)) +
+#     
+#     theme_bw() +
+#     theme(
+#         legend.position = "top",
+#         # plot.margin = margin(t = 10, r = 10, b = 10, l = 10),
+#         legend.text = element_text(size = 11),  # 👈 increase legend text size
+#         strip.text.x = element_text(size = 11, face = "bold"),
+#         strip.text.y = element_text(size = 11, face = "bold"),
+#         axis.title = element_text(size = 12),
+#         axis.title.x = element_text(margin = margin(t = 10)),
+#         axis.title.y = element_text(margin = margin(r = 10)),
+#         plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+#         panel.grid.major = element_line(color = "grey85", size = 0.5),
+#         panel.grid.minor = element_blank()
+#     ) +
+#     labs(
+#         fill = "Timepoint",
+#         title = "CTC count distribution by Enrichment methods and Malignancy"
+#     )
+
+# Voilin plot
+
+data |> 
+    mutate(
+        Cancer = recode(Cancer, "positive" = "Malignant", "negative" = "Benign"),
+        Method = recode(Method, "Method01" = "CellSearch", "Method02" = "Parsortix"),
+        Timepoint = factor(Timepoint, levels = c("pre_biopsy", "post_biopsy"))
+    ) |>
+    ggplot(aes(x = Timepoint, y = CTC_count)) + 
+    
+    # Violin plot for distribution
+    geom_violin(trim = FALSE, alpha = 0.3) +
+    
+    # Median + IQR (Interquartile Range)
+    # stat_summary(
+    #     fun.data = function(y) {
+    #         q <- quantile(y, probs = c(0.25, 0.5, 0.75))
+    #         data.frame(y = q[2], ymin = q[1], ymax = q[3])
+    #     },
+    #     geom = "errorbar", width = 0.2, color = "black"
+    # ) +
+    # stat_summary(
+    #     fun = median, geom = "point", shape = 95, size = 6, color = "black"
+    # ) +
+    
+    # Jittered points: 0s and >0s
+    geom_jitter(data = \(df) subset(df, CTC_count == 0),
+                aes(color = Cancer),
+                position = position_jitter(width = 0.4, height = 0.1),
+                alpha = 0.7, size = 1.5, shape = 16) +
+    geom_jitter(data = \(df) subset(df, CTC_count > 0),
+                aes(color = Cancer),
+                position = position_jitter(width = 0.1, height = 0.1),
+                alpha = 0.7, size = 1.5, shape = 16) +
+    
+    # Facet with matching layout and labeling
+    facet_grid(rows = vars(Method), cols = vars(Cancer)) +
+    
+    # Matching color scale
+    scale_color_manual(values = c("Malignant" = "#619CFF", "Benign" = "#F8766D")) +
+    
+    # Y-axis ticks
+    scale_y_continuous(
+        breaks = seq(min(data$CTC_count, na.rm = TRUE), 
+                     max(data$CTC_count, na.rm = TRUE), by = 1)
+    ) +
+    
+    # Theme to match Plot 2
+    theme_bw() +
+    theme(
+        legend.position = "none",
+        plot.margin = margin(t = 10, r = 10, b = 10, l = 10),
+        strip.text.x = element_text(size = 11, face = "bold"),
+        strip.text.y = element_text(size = 11, face = "bold"),
+        axis.title = element_text(size = 12),
+        axis.title.x = element_text(margin = margin(t = 10)),
+        axis.title.y = element_text(margin = margin(r = 10)),
+        plot.title = element_text(hjust = 0.5, face = "bold", size = 14, margin = margin(b = 15)),
+        panel.grid.major = element_line(color = "grey85", size = 0.5),
+        panel.grid.minor = element_blank()
+    ) +
+    
+    labs(
+        x = "Timepoint",
+        y = "CTC count",
+        title = "CTC count distribution by Enrichment methods and Malignancy"
+    )
+
+```

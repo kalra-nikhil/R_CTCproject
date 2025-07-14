@@ -1,0 +1,8 @@
+project:
+  type: default
+
+title: "CTC Analysis"
+author: "Nikhil Kalra"
+
+resources:
+  - Rscripts/

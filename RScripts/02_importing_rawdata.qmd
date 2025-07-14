@@ -1,0 +1,9 @@
+# Importing data
+```{r}
+biopsydata <- read_xlsx(here("Data/CTCdata.xlsx"))
+# baselinedata <- read_xlsx(here("Data/CTCanalysis_NK.xlsx"), 
+#                                sheet = 2)
+# qualvars <- ColSeeker(biopsydata,
+#                      namepattern=c("^C","meno","Stanze","Ne"))
+
+```

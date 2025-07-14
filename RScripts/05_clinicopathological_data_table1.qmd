@@ -1,0 +1,372 @@
+# Table 1 : Age statistics
+```{r}
+#| eval: false
+# Age plot
+rawdata_wide |>
+    mutate(Age = as.numeric(Age)) |> 
+    filter(complete == "yes", !is.na(Age)) |>
+    ggplot(aes(x = Age, color = Cancer)) +
+    geom_density() +
+    labs(title = "Age Distribution by Cancer Status")
+
+# Age statistics
+summarize_numeric_var <- function(df, varname, label) {
+  var_sym <- sym(varname)
+
+  # Step 1: prepare your data
+  data <- df %>%
+    mutate(Value = as.numeric(as.character(!!var_sym)))
+
+  # Step 2: by-group summary
+  summary_by_group <- data %>%
+    group_by(Cancer) %>%
+    summarise(
+      mean   = round(mean(Value, na.rm = TRUE), 1),
+      median = round(median(Value, na.rm = TRUE), 1),
+      min    = min(Value, na.rm = TRUE),
+      max    = max(Value, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      summary = paste0(mean, " (", median, ", ", min, "–", max, ")")
+    ) %>%
+    select(Cancer, summary)
+
+  # Step 3: overall summary
+  total_summary <- data %>%
+    summarise(
+      mean   = round(mean(Value, na.rm = TRUE), 1),
+      median = round(median(Value, na.rm = TRUE), 1),
+      min    = min(Value, na.rm = TRUE),
+      max    = max(Value, na.rm = TRUE)
+    ) %>%
+    with(paste0(mean, " (", median, ", ", min, "–", max, ")"))
+
+  # Step 4: pivot wider
+  summary_wide <- summary_by_group %>%
+    pivot_wider(
+      names_from   = Cancer,
+      values_from  = summary,
+      names_prefix = "CA_"
+    )
+
+  # Step 5: normality & test choice
+  p_shap <- data %>%
+    group_by(Cancer) %>%
+    summarise(p = shapiro.test(Value)$p.value) %>%
+    pull(p)
+
+  use_t <- all(p_shap > 0.05)
+  test  <- if (use_t) t.test(Value ~ Cancer, data = data)
+           else     wilcox.test(Value ~ Cancer, data = data)
+
+  pval <- formatC(test$p.value, format = "f", digits = 6)
+
+  # Step 6: assemble
+  summary_wide %>%
+    mutate(
+      !!label := label,
+      total_cases = total_summary,
+      P_value     = pval
+    ) %>%
+    relocate(all_of(label), CA_positive, CA_negative, total_cases, P_value)
+}
+
+
+summarize_numeric_var(rawdata_wide, "Age", "Age") |>
+flextable() |> 
+set_table_properties(width = 0.8, layout = "autofit") |>
+    set_caption("Normality and Wilcoxon Tests for Age")
+
+```
+
+# Table 1 : Clinicopathological parameters
+```{r}
+#| eval: false
+# Clinicopathologic parameters
+`%||%` <- function(a, b) if (!is.null(a)) a else b
+
+calculate_p_value <- function(data, group_col) {
+    contingency <- table(data[[group_col]], data$Cancer)
+    if (nrow(contingency) < 2 || ncol(contingency) < 2) return("-")
+    test <- tryCatch({
+        expected <- suppressWarnings(chisq.test(contingency)$expected)
+        if (any(expected < 5)) fisher.test(contingency)
+        else chisq.test(contingency)
+    }, error = function(e) NULL)
+    if (is.null(test)) return("-")
+    formatC(test$p.value, format = "f", digits = 6)
+}
+
+summarize_with_p <- function(data, group_var, label = NULL) {
+    label <- label %||% group_var
+    
+    # Merge specific group levels
+    if (group_var == "Menopause") {
+        data[[group_var]] <- recode(data[[group_var]],
+                                    "premenopausal" = "pre/perimenopausal",
+                                    "perimenopausal" = "pre/perimenopausal")
+    }
+    if (group_var == "N_stage_f") {
+        data[[group_var]] <- recode(data[[group_var]],
+                                    "N0" = "N0/Nx", "Nx" = "N0/Nx")
+    }
+    if (group_var == "M_stage_f") {
+        data[[group_var]] <- recode(data[[group_var]],
+                                    "M0" = "M0/Mx", "Mx" = "M0/Mx")
+    }
+    if (group_var == "T_stage_f") {
+        data[[group_var]] <- recode(data[[group_var]],
+                                    "T1+T2" = "Tis/T1+T2",
+                                    "Tis" = "Tis/T1+T2")
+    }
+    
+    pval <- calculate_p_value(data, group_var)
+    
+    content <- data |>
+        mutate(Group = as.character(.data[[group_var]]),
+               Group = ifelse(is.na(Group), "NA", Group)) |>
+        group_by(Group) |>
+        summarise(
+            CA_negative = sum(Cancer == "negative", na.rm = TRUE),
+            CA_positive = sum(Cancer == "positive", na.rm = TRUE),
+            .groups = "drop"
+        ) |>
+        mutate(
+            total_cases = CA_negative + CA_positive,
+            total_all = sum(total_cases),
+            CA_negative = paste0(CA_negative, " (", percent(CA_negative / sum(CA_negative)), ")"),
+            CA_positive = paste0(CA_positive, " (", percent(CA_positive / sum(CA_positive)), ")"),
+            total_cases = paste0(total_cases, " (", percent(total_cases / total_all), ")"),
+            P_value = as.character(pval),
+            Variable = "",
+            Subgroup = Group
+        ) |>
+        select(Variable, Subgroup, CA_positive, CA_negative, total_cases, P_value) |>
+        arrange(ifelse(Subgroup == "NA", 1, 0), Subgroup)
+    
+    header_row <- tibble(
+        Variable = label,
+        Subgroup = "",
+        CA_positive = "",
+        CA_negative = "",
+        total_cases = "",
+        P_value = ""
+    )
+    
+    bind_rows(header_row, content)
+}
+
+# Build full table
+full_table <- bind_rows(
+    summarize_with_p(rawdata_wide, "Menopause", "Menopause"),
+    summarize_with_p(rawdata_wide, "Stanze_type", "Tissue Biopsy"),
+    summarize_with_p(rawdata_wide, "patho_ER_f", "ER Status"),
+    summarize_with_p(rawdata_wide, "patho_PR_f", "PR Status"),
+    summarize_with_p(rawdata_wide, "patho_HER2_f", "HER2 Status"),
+    summarize_with_p(rawdata_wide, "patho_Ki67_f", "Ki67 Status")
+)
+
+# Stage variables
+stage_vars <- list(
+    T_stage_f = "Tumor Stage",
+    N_stage_f = "Node Stage",
+    M_stage_f = "Metastasis Stage",
+    G_stage_f = "Grade",
+    L_stage_f = "Lymphovascular Invasion",
+    V_stage_f = "Vascular Invasion",
+    n_stage_f = "Nodal Stage (n_stage)",
+    R_stage_f = "Resection Margin"
+)
+
+for (var in names(stage_vars)) {
+    full_table <- bind_rows(full_table, summarize_with_p(rawdata_wide, var, stage_vars[[var]]))
+}
+
+# Subtype
+subtype_tbl <- rawdata_wide |>
+    mutate(across(c(patho_ER, patho_PR, patho_Ki67), as.numeric)) |>
+    filter(Cancer == "positive") |>
+    mutate(
+        Subgroup = case_when(
+            (patho_ER > 0 | patho_PR > 0) & patho_HER2 == "neg" & patho_Ki67 <= 15 ~ "Luminal_A",
+            (patho_ER > 0 | patho_PR > 0) & patho_HER2 %in% c("neg", "pos") & patho_Ki67 > 15 ~ "Luminal_B",
+            patho_ER == 0 & patho_PR == 0 & patho_HER2 == "pos" ~ "HER2/neu",
+            patho_ER == 0 & patho_PR == 0 & patho_HER2 == "neg" ~ "TNBC",
+            (patho_ER > 0 | patho_PR > 0) & patho_HER2 == "pos" ~ "Triple_Positive",
+            is.na(patho_ER) | is.na(patho_PR) | is.na(patho_HER2) | is.na(patho_Ki67) ~ "NA"
+        )
+    ) |>
+    count(Subgroup) |>
+    arrange(ifelse(Subgroup == "NA", 1, 0), Subgroup) |>
+    mutate(
+        Variable = "",
+        CA_positive = paste0(n, " (", percent(n / sum(n)), ")"),
+        CA_negative = "-",
+        total_cases = CA_positive,
+        P_value = "-"
+    ) |>
+    select(Variable, Subgroup, CA_positive, CA_negative, total_cases, P_value)
+
+full_table <- bind_rows(full_table, bind_rows(
+    tibble(Variable = "Molecular Subtype", 
+           Subgroup = "", CA_positive = "", CA_negative = "", 
+           total_cases = "", P_value = ""),
+    subtype_tbl
+))
+
+# Histology (CA positive)
+CApos_hist <- rawdata_wide |>
+    filter(Cancer == "positive") |>
+    mutate(Subgroup = case_when(
+        grepl("IDC|NST", Histology, ignore.case = TRUE) ~ "IDC/NST",
+        grepl("DCIS", Histology, ignore.case = TRUE) ~ "DCIS",
+        is.na(Histology) ~ "NA",
+        TRUE ~ "Other"
+    )) |>
+    count(Subgroup) |>
+    arrange(ifelse(Subgroup == "NA", 1, 0), Subgroup) |>
+    mutate(
+        Variable = "",
+        CA_positive = paste0(n, " (", percent(n / sum(n)), ")"),
+        CA_negative = "-",
+        total_cases = CA_positive,
+        P_value = "-"
+    ) |>
+    select(Variable, Subgroup, CA_positive, CA_negative, total_cases, P_value)
+
+full_table <- bind_rows(full_table, bind_rows(
+    tibble(Variable = "Histology (CA Positive)", 
+           Subgroup = "", CA_positive = "", CA_negative = "", 
+           total_cases = "", P_value = ""),
+    CApos_hist
+))
+
+# Histology (CA negative)
+CAneg_hist <- rawdata_wide |>
+    filter(Cancer == "negative") |>
+    mutate(Subgroup = case_when(
+        grepl("Fibrosis|Periductal Fibrosis|Fibrous Mastopathy|Cyst|Benign Cyst|Fibromatosis|Necrotic tissue", 
+              Histology, ignore.case = TRUE) ~ "Fibrous Lesions",
+        grepl("Fibroadenoma|Fibroma|Hamartoma", Histology, ignore.case = TRUE) ~ "Fibrous Tumors",
+        grepl("Intraductal Papilloma|UDH|CLIS", Histology, ignore.case = TRUE) ~ "Epithelial Lesions",
+        is.na(Histology) ~ "NA",
+        TRUE ~ "Other"
+    )) |>
+    count(Subgroup) |>
+    arrange(ifelse(Subgroup == "NA", 1, 0), Subgroup) |>
+    mutate(
+        Variable = "",
+        CA_negative = paste0(n, " (", percent(n / sum(n)), ")"),
+        CA_positive = "-",
+        total_cases = CA_negative,
+        P_value = "-"
+    ) |>
+    select(Variable, Subgroup, CA_positive, CA_negative, total_cases, P_value)
+
+bind_rows(
+  full_table,
+  tibble(Variable = "Histology (CA Negative)", 
+         Subgroup = "", CA_positive = "", CA_negative = "", 
+         total_cases = "", P_value = ""),
+  CAneg_hist
+) |>
+  flextable() |>
+  set_table_properties(width = 0.8, layout = "autofit")
+
+
+
+
+# CTC counts before biopsy # 01
+# rawdata_wide |>
+#     select(Patient_ID, Cancer, Method01_pre, Method02_pre) |>
+#     pivot_longer(
+#         cols      = starts_with("Method"),
+#         names_to  = "Method",
+#         values_to = "Value"
+#     ) |>
+#     group_by(Method, Cancer) |>
+#     summarise(
+#         Count   = sum(Value, na.rm = TRUE),
+#         .groups = "drop"
+#     ) |>
+#     pivot_wider(
+#         names_from   = Cancer,
+#         values_from  = Count,
+#         values_fill  = 0
+#     ) |>
+#     mutate(
+#         Row_Sum = rowSums(across(where(is.numeric))),
+#         p_value = formatC(
+#             fisher.test(
+#                 as.matrix(pick(positive, negative))
+#             )$p.value,
+#             format = "f",
+#             digits = 6
+#         )
+#     ) |> 
+#     flextable() |>
+#     set_table_properties(width = 0.8, layout = "autofit") |>
+#     set_caption("CTC Counts Before Biopsy by Method and Cancer Status")
+# 
+# # CTC counts before biopsy # 02
+# rawdata_wide |>
+#     select(Patient_ID, Cancer, Method01_pre, Method02_pre) |>
+#     pivot_longer(
+#         cols = starts_with("Method"),
+#         names_to = "Method",
+#         values_to = "CTC_Count"
+#     ) |>
+#     mutate(CTC_Positive = ifelse(CTC_Count > 0, 1, 0)) |>
+#     group_by(Method, Cancer) |>
+#     summarise(
+#         CTC_Positive_Count = sum(CTC_Positive),
+#         Total = n(),
+#         .groups = "drop"
+#     ) |>
+#     pivot_wider(
+#         names_from = Cancer,
+#         values_from = c(CTC_Positive_Count, Total),
+#         values_fill = 0
+#     ) |>
+#     rowwise() |>
+#     mutate(
+#         Row_Sum = CTC_Positive_Count_positive + CTC_Positive_Count_negative,
+#         p_value = formatC(
+#             fisher.test(matrix(c(
+#                 CTC_Positive_Count_positive,
+#                 Total_positive - CTC_Positive_Count_positive,
+#                 CTC_Positive_Count_negative,
+#                 Total_negative - CTC_Positive_Count_negative
+#             ), nrow = 2))$p.value,
+#             format = "f", digits = 6
+#         )
+#     ) |>
+#     select(
+#         Method,
+#         Cancer_Positive = CTC_Positive_Count_positive,
+#         Cancer_Negative = CTC_Positive_Count_negative,
+#         Total_Positive = Total_positive,
+#         Total_Negative = Total_negative,
+#         Row_Sum,
+#         p_value
+#     ) |>
+#     flextable() |>
+#     set_table_properties(width = 0.8, layout = "autofit") |>
+#     set_caption("Proportion of Patients with ≥1 CTC Before Biopsy by Method and Cancer Status")
+
+
+
+rm(
+  `%||%`,
+  calculate_p_value,
+  summarize_with_p,
+  full_table,
+  stage_vars,
+  var,
+  subtype_tbl,
+  CApos_hist,
+  CAneg_hist
+)
+
+```

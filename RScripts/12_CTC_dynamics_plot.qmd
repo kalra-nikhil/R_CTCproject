@@ -1,0 +1,136 @@
+# Plotting CTC dynamics
+```{r}
+#| eval: false
+# Function to generate a plot for a specific method
+generate_method_plot <- function(data, method_name, panels_per_row = 5) {
+    method_label <- recode(method_name,
+                           "Method01" = "CellSearch",
+                           "Method02" = "Parsortix")
+    
+    # Process data
+    plot_data <- data |>
+        filter(Method == method_name, Cancer == "positive") |>
+        select(Patient_ID, Cancer, Method, Timepoint, CTC_count) |>
+        pivot_wider(names_from = Timepoint, values_from = CTC_count) |>
+        mutate(
+            CTC_diff = post_biopsy - pre_biopsy,
+            CTCchange = case_when(
+                CTC_diff > 0 ~ "CTC_inc",
+                CTC_diff < 0 ~ "CTC_dec",
+                CTC_diff == 0 & pre_biopsy != 0 & post_biopsy != 0 ~ "stable_pos",
+                TRUE ~ "other"
+            )
+        ) |>
+        filter(CTCchange != "other") |>
+        pivot_longer(
+            cols = c(pre_biopsy, post_biopsy),
+            names_to = "Timepoint",
+            values_to = "CTC_count"
+        ) |>
+        mutate(
+            Timepoint = factor(paste0("CTC_", Timepoint), 
+                               levels = c("CTC_pre_biopsy", "CTC_post_biopsy"))
+        )
+    
+    # Define desired CTCchange order
+    ctc_order <- c("CTC_dec", "stable_pos", "CTC_inc")
+    
+    # Get ordered patient IDs by CTCchange
+    ordered_ids <- plot_data |>
+        filter(Timepoint == "CTC_post_biopsy", !grepl("Dummy_", Patient_ID)) |>
+        distinct(Patient_ID, CTCchange) |>
+        mutate(CTCchange = factor(CTCchange, levels = ctc_order)) |>
+        arrange(CTCchange) |>
+        pull(Patient_ID)
+    
+    # Add dummy panels to complete layout grid
+    num_dummies <- ceiling(length(ordered_ids) / panels_per_row) * panels_per_row - length(ordered_ids)
+    dummy_ids <- if (num_dummies > 0) paste0("Dummy_", seq_len(num_dummies)) else character(0)
+    
+    if (num_dummies > 0) {
+        dummy_data <- tibble(
+            Patient_ID = rep(dummy_ids, each = 2),
+            Cancer = NA,
+            Method = method_name,
+            CTC_diff = NA,
+            CTCchange = NA,
+            Timepoint = factor(rep(c("CTC_pre_biopsy", "CTC_post_biopsy"), times = num_dummies),
+                               levels = c("CTC_pre_biopsy", "CTC_post_biopsy")),
+            CTC_count = 0
+        )
+        plot_data <- bind_rows(plot_data, dummy_data)
+    }
+    
+    # Set ordered Patient_ID factor
+    all_ids <- c(ordered_ids, dummy_ids)
+    plot_data <- plot_data |>
+        mutate(Patient_ID = factor(Patient_ID, levels = all_ids))
+    
+    # Plot
+    ggplot(plot_data, aes(x = Timepoint, y = CTC_count, group = Patient_ID)) +
+        geom_hline(yintercept = 0, linetype = "dashed", color = "black", linewidth = 0.5) +
+        geom_line(
+            data = plot_data |> filter(!grepl("Dummy_", Patient_ID)),
+            aes(x = Timepoint, y = CTC_count, group = Patient_ID),
+            color = "gray60",
+            linewidth = 1.15,
+            lineend = "round",
+            alpha = 1
+        ) +
+        geom_point(
+            data = plot_data |> filter(Timepoint == "CTC_pre_biopsy" & !grepl("Dummy_", Patient_ID)),
+            shape = 21, size = 3, fill = "white", color = "black"
+        ) +
+        geom_point(
+            data = plot_data |> filter(Timepoint == "CTC_post_biopsy" & !grepl("Dummy_", Patient_ID)),
+            aes(shape = CTCchange, fill = CTCchange),
+            size = 3, color = "black"
+        ) +
+        scale_shape_manual(values = c("CTC_inc" = 24, "CTC_dec" = 25, "stable_pos" = 21)) +
+        scale_fill_manual(values = c("CTC_inc" = "black", "CTC_dec" = "black", "stable_pos" = "white")) +
+        scale_x_discrete(labels = c("pre-biopsy", "post-biopsy")) +
+        scale_y_continuous(breaks = seq(0, 8, by = 2), limits = c(-1, 7.5)) +
+        labs(
+            title = paste("Malignant Cases:", method_label, "CTC dynamics compared to baseline"),
+            x = "Timepoint",
+            y = "CTC count"
+        ) +
+        theme_minimal() +
+        theme(
+            legend.position = "none",
+            plot.title = element_text(size = 13, face = "bold", hjust = 0.5),
+            plot.margin = margin(t = 10, r = 10, b = 10, l = 10),
+            axis.title.x = element_text(size = 11, margin = margin(t = 10)),
+            axis.title.y = element_text(size = 11, margin = margin(r = 10)),
+            axis.text.x = element_text(face = "bold", angle = 90, hjust = 1, vjust = 0.5),
+            axis.ticks = element_line(size = 0.5),
+            panel.grid = element_blank(),
+            strip.text = element_blank(),
+            panel.spacing = unit(0.01, "lines"),
+            axis.line.y = element_line()
+        ) +
+        facet_wrap(~ Patient_ID, ncol = panels_per_row)
+}
+
+# Generate plots for both methods
+plot_method01 <- generate_method_plot(data, "Method01")
+png("plot_method01.png", width = 2400, height = 1700, res = 300)
+print(plot_method01)
+dev.off()
+
+plot_method02 <- generate_method_plot(data, "Method02")
+png("plot_method02.png", width = 2400, height = 1700, res = 300)
+print(plot_method02)  # This too
+dev.off()
+
+
+# Combine plots vertically
+# combined_plot <- plot_method01 / plot_method02 + 
+#   plot_layout(heights = c(1, 1))
+# 
+# # Display the combined plot
+# combined_plot
+
+rm(plot_method01, plot_method02, generate_method_plot)
+
+```

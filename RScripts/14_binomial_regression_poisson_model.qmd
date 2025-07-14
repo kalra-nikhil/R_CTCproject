@@ -1,0 +1,203 @@
+# Binomial regression with imputated data: O vs. >0 AND 0-1 vs. >1
+```{r}
+#| eval: false
+.initial_objects <- ls()
+
+# Define clinical variables
+clinical_vars <- c("Menopause", "Stanze_type",
+                   "T_stage_f", "N_stage_f", "G_stage_f",
+                   "patho_ER_f", "patho_PR_f", "patho_HER2_f", "patho_Ki67_f")
+
+# Step 1: Prepare dataset
+df_all <- data |>
+  select(Patient_ID, Cancer, Menopause, Stanze_type, Method, Timepoint, CTC_count, ends_with("_f")) |>
+  filter(Cancer == "positive") |>
+  mutate(
+    CTC_count = as.numeric(CTC_count),
+    across(.cols = contains("_f"), .fns = as.character),
+
+    # Clinical recoding
+    Menopause = case_when(
+      Menopause %in% c("premenopausal", "perimenopausal") ~ "premenopausal",
+      Menopause == "postmenopausal" ~ "postmenopausal",
+      TRUE ~ NA_character_
+    ),
+    T_stage_f = case_when(
+      T_stage_f %in% c("Tis", "T1+T2") ~ "Tis+T1+T2",
+      T_stage_f == "T3+T4" ~ "T3+T4",
+      TRUE ~ NA_character_
+    ),
+    N_stage_f = case_when(
+      N_stage_f %in% c("N0", "Nx") ~ "neg",
+      N_stage_f == "N1" ~ "pos",
+      TRUE ~ NA_character_
+    ),
+    M_stage_f = case_when(
+      M_stage_f %in% c("M0", "MX") ~ "neg",
+      M_stage_f == "M1" ~ "pos",
+      TRUE ~ NA_character_
+    )
+  ) |>
+  mutate(
+    # Convert to factors with specified levels
+    patho_ER_f = factor(patho_ER_f, levels = c("low (<=15%)", "high (>15%)")),
+    patho_PR_f = factor(patho_PR_f, levels = c("low (<=15%)", "high (>15%)")),
+    patho_HER2_f = factor(patho_HER2_f, levels = c("neg", "pos")),
+    patho_Ki67_f = factor(patho_Ki67_f, levels = c("low (<=15%)", "high (>15%)")),
+    T_stage_f = factor(T_stage_f, levels = c("Tis+T1+T2", "T3+T4")),
+    N_stage_f = factor(N_stage_f, levels = c("neg", "pos")),
+    M_stage_f = factor(M_stage_f, levels = c("neg", "pos")),
+    G_stage_f = factor(G_stage_f, levels = c("G1+G2", "G3")),
+    Timepoint = factor(Timepoint, levels = c("pre_biopsy", "post_biopsy")),
+    Method = factor(Method, levels = c("Method01", "Method02")),
+    Menopause = factor(Menopause, levels = c("premenopausal", "postmenopausal")),
+    Stanze_type = factor(Stanze_type, levels = c("Punch", "Vacuum"))
+  ) |>
+  mutate(across(where(is.character), as.factor)) |>
+  mutate(
+    CTC_count_binary1 = as.integer(CTC_count > 0),
+    CTC_count_binary2 = as.integer(CTC_count > 1)
+  ) |>
+  select(where(~ mean(is.na(.)) <= 0.5))
+
+# Step 2: Multiple imputation
+methods <- make.method(df_all)
+
+# logreg failed; polyreg is more stable for unordered factors and uses multinomial models
+methods[c("patho_ER_f", "patho_PR_f", "patho_HER2_f", "patho_Ki67_f", "T_stage_f", "N_stage_f", "G_stage_f")] <- "polyreg"
+
+
+imp <- mice(df_all, m = 20, method = methods, seed = 100)
+
+# Step 3: Select response variable
+ctc_binary_response <- "CTC_count_binary1"
+
+# Step 4: Base model (Timepoint + Method + Random Intercept)
+base_model_formula <- as.formula(paste0(ctc_binary_response, " ~ Timepoint * Method + (1 | Patient_ID)"))
+base_model_fit <- with(imp, glmmTMB(base_model_formula, family = binomial()))
+
+# Step 5: Variable selection using D1 (Rubin's pooled LRT)
+results_d1 <- lapply(clinical_vars, function(var) {
+  message("Processing variable: ", var)
+  
+  full_formula <- as.formula(paste0(ctc_binary_response, " ~ Timepoint * Method + ", var, " + (1 | Patient_ID)"))
+  
+  full_fit <- tryCatch({
+    with(imp, glmmTMB(full_formula, family = binomial()))
+  }, error = function(e) {
+    message("❌ Model failed for: ", var, " — ", e$message)
+    return(NULL)
+  })
+  
+  if (is.null(full_fit)) return(tibble(variable = var, LRT_D1_p = NA))
+  
+  test <- tryCatch({
+    D1(full_fit, base_model_fit)
+  }, error = function(e) {
+    message("❌ D1 test failed for: ", var, " — ", e$message)
+    return(NULL)
+  })
+  
+  if (!is.null(test) && !is.null(test$result) && "P(>F)" %in% colnames(test$result)) {
+    tibble(variable = var, LRT_D1_p = test$result[,"P(>F)"])
+  } else {
+    tibble(variable = var, LRT_D1_p = NA)
+  }
+}) %>% bind_rows()
+
+
+# Step 6: Select variables with LRT p < 0.2
+selected_vars <- results_d1 %>% filter(!is.na(LRT_D1_p), LRT_D1_p < 0.2) %>% pull(variable)
+
+# Step 7: Fit reduced model with selected vars
+reduced_formula <- as.formula(
+  paste0(ctc_binary_response, " ~ Timepoint * Method + ",
+         paste(selected_vars, collapse = " + "), " + (1 | Patient_ID)")
+)
+reduced_model_fit <- with(imp, glmmTMB(reduced_formula, family = binomial()))
+reduced_summary <- summary(pool(reduced_model_fit))
+
+cat("\n--- Reduced Model Summary ---\n")
+print(reduced_summary)
+
+# Step 8: Fit full model with all variables
+full_formula <- as.formula(
+  paste0(ctc_binary_response, " ~ Timepoint * Method + ",
+         paste(clinical_vars, collapse = " + "), " + (1 | Patient_ID)")
+)
+full_model_fit <- with(imp, glmmTMB(full_formula, family = binomial()))
+full_summary <- summary(pool(full_model_fit))
+
+cat("\n--- Full Model Summary ---\n")
+print(full_summary)
+
+# Step 9: Check collinearity on first imputed dataset
+# 1. Extract the first completed dataset
+df_complete <- complete(imp, 1)
+
+# 2. Construct formula safely
+rhs <- if (length(selected_vars) > 0) {
+  paste0("Timepoint * Method + ", paste(selected_vars, collapse = " + "))
+} else {
+  "Timepoint * Method"
+}
+
+# 3. Fit the model
+vif_model <- glm(
+  formula = as.formula(paste(ctc_binary_response, "~", rhs)),
+  family = binomial(),
+  data = df_complete
+)
+
+# 4. Calculate VIF
+print(vif(vif_model))
+
+  # formula = as.formula(paste0(ctc_binary_response, " ~ ",
+  #                             paste(c("Timepoint", "Method", selected_vars),
+  #                                   collapse = " + "))),
+
+
+# Step 10: Model diagnostics on complete data
+reduced_glmm_complete <- glmmTMB(formula = reduced_formula, family = binomial(), data = df_complete)
+
+# Optional: check model convergence
+check_model(reduced_glmm_complete)
+
+# Step 11: DHARMa residual diagnostics
+sim_res <- simulateResiduals(reduced_glmm_complete)
+plot(sim_res)
+
+# Step 12: ROC + AUC
+prob <- predict(reduced_glmm_complete, type = "response")
+roc_obj <- roc(df_complete[[ctc_binary_response]], prob)
+plot(roc_obj)
+cat("AUC:", auc(roc_obj), "\n")
+
+# Step 13: Coefficient plot
+coef_plot <- tidy(pool(reduced_model_fit)) %>%
+  mutate(significant = p.value < 0.05) %>%
+  ggplot(aes(term, estimate, color = significant)) +
+  geom_point(size = 2) +
+  geom_errorbar(aes(ymin = estimate - 1.96 * std.error,
+                    ymax = estimate + 1.96 * std.error), width = 0.2) +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "Reduced Model Coefficients", x = "Predictor", y = "Estimate (log-odds)")
+
+print(coef_plot)
+# ggsave("reduced_model_coefficients.png", coef_plot, width = 6, height = 4)
+
+# Step 14: Probability interpretation
+expit <- function(x) exp(x) / (1 + exp(x))
+intercepts <- tidy(pool(reduced_model_fit)) %>%
+  filter(term == "(Intercept)") %>%
+  pull(estimate)
+cat("Baseline predicted probability:", round(expit(intercepts), 3), "\n")
+
+# Step 15: Save variable selection table
+# write.csv(results_d1, "variable_selection_results.csv", row.names = FALSE)
+
+rm(list = setdiff(ls(), .initial_objects))
+gc()
+
+```

@@ -1,0 +1,185 @@
+# CNA script
+```{r}
+# Set working directory
+# workdir <- setwd("D:/Thesis/Thesis_stuff/NGS_results/F21FTSEUET0144_HUMpdqR")
+root_path <- "D:/Thesis/Thesis_stuff/NGS_results/F21FTSEUET0144_HUMpdqR"
+
+# Filepaths
+# data_filepath <- file.path(root_path, "CNA_logratio", "cell55_V300101857_L3_DKWGS211130051-519.dedup.bam_ratio.txt")
+# data_filepath <- file.path(root_path,"CNA_logratio", "cell56_V300101857_L3_DKWGS211130052-520.dedup.bam_ratio.txt")
+# data_filepath <- file.path(root_path, "CNA_logratio", "cell57_V300101857_L3_DKWGS211130053-521.dedup.bam_ratio.txt")
+# data_filepath <- file.path(root_path, "CNA_logratio", "cell58_V300101857_L3_DKWGS211130054-522.dedup.bam_ratio.txt")
+# data_filepath <- file.path(root_path, "CNA_logratio", "cell59_V300101857_L3_DKWGS211130055-523.dedup.bam_ratio.txt")
+# data_filepath <- file.path(root_path, "CNA_logratio", "cell60_V300101857_L3_DKWGS211130056-524.dedup.bam_ratio.txt")
+# data_filepath <- file.path(root_path, "CNA_logratio", "cell37_V300101857_L3_DKWGS211130033-501.dedup.bam_ratio.txt")
+# data_filepath <- file.path(root_path, "CNA_logratio", "cell38_V300101857_L3_DKWGS211130034-502.dedup.bam_ratio.txt")
+# data_filepath <- file.path(root_path, "CNA_logratio", "cell39_V300101857_L3_DKWGS211130035-503.dedup.bam_ratio.txt")
+# data_filepath <- file.path(root_path, "CNA_logratio", "cell40_V300101857_L3_DKWGS211130036-504.dedup.bam_ratio.txt")
+# data_filepath <- file.path(root_path, "CNA_logratio", "cell88_E150007285_L01_42.dedup.bam_ratio.txt")
+# data_filepath <- file.path(root_path, "CNA_logratio", "cell89_E150007285_L01_43.dedup.bam_ratio.txt")
+# data_filepath <- file.path(root_path, "CNA_logratio", "cell90_E150007285_L01_44.dedup.bam_ratio.txt")
+# data_filepath <- file.path(root_path, "CNA_logratio", "cell91_E150007285_L01_45.dedup.bam_ratio.txt")
+# data_filepath <- file.path(root_path, "CNA_logratio", "cell84_E150007285_L01_14.dedup.bam_ratio.txt")
+# data_filepath <- file.path(root_path, "CNA_logratio", "cell93_E150007285_L01_47.dedup.bam_ratio.txt")
+# data_filepath <- file.path(root_path, "CNA_logratio", "cell85_E150007285_L01_15.dedup.bam_ratio.txt")
+# data_filepath <- file.path(root_path,"CNA_logratio", "cell92_E150007285_L01_46.dedup.bam_ratio.txt")
+# data_filepath <- file.path(root_path, "CNA_logratio", "cell86_E150007285_L01_16.dedup.bam_ratio.txt")
+data_filepath <- file.path(root_path, "CNA_logratio", "cell87_E150007285_L01_41.dedup.bam_ratio.txt")
+
+
+chr_length_filepath <- "D:/Thesis/Thesis_stuff/NGS_results/F21FTSEUET0144_HUMpdqR/reference_files/Chr_Human_hg38_length.txt"
+chr_centromere_filepath <- "D:/Thesis/Thesis_stuff/NGS_results/F21FTSEUET0144_HUMpdqR/reference_files/Chr_Human_hg38_centromere.txt"
+
+# Read data
+data <- read_delim(data_filepath, delim="\t")
+chr_length <- read.delim(chr_length_filepath, stringsAsFactors=FALSE)
+chr_arms <- read.delim(chr_centromere_filepath, stringsAsFactors=FALSE)
+
+# Prepare genomic positions
+cum_pos <- 0
+genom_pos <- data.frame(chr=data$Chromosome, start=as.numeric(data$Start))
+
+for (c in 2:24) {
+  cur_chr <- chr_length$Chr[c]
+  cum_pos <- cum_pos + chr_length$Length[c-1]
+  genom_pos$start[genom_pos$chr %in% cur_chr] <- genom_pos$start[genom_pos$chr %in% cur_chr] + cum_pos
+  chr_arms$start[chr_arms$chr %in% cur_chr] <- chr_arms$start[chr_arms$chr %in% cur_chr] + cum_pos
+  chr_arms$end[chr_arms$chr %in% cur_chr] <- chr_arms$end[chr_arms$chr %in% cur_chr] + cum_pos
+}
+
+sort_order <- order(genom_pos$start)
+genom_pos <- genom_pos[sort_order, ]
+data <- data[sort_order, ]
+
+keep <- genom_pos$chr %in% c(as.character(1:22), "X", "Y")
+data <- data[keep, ]
+genom_pos <- genom_pos[keep, ]
+
+# Log2 transform data
+data$Ratio <- log2(data$Ratio)
+data$MedianRatio <- log2(data$MedianRatio)
+
+# CNA status for legend
+data$CN_status <- ifelse(data$CopyNumber > median(data$CopyNumber), "Gain",
+                         ifelse(data$CopyNumber < median(data$CopyNumber), "Loss", "Neutral"))
+
+# Re-define CNA status
+# “Copy number gain or loss was defined as segmented log2 ratio >0.3 or <−0.3, respectively.”
+# — Taylor et al., Nat Genet 2018; Baslan et al., Nat Protoc 2020
+# data$CN_status <- ifelse( data$MedianRatio > 0.3, "Gain", 
+#                   ifelse(data$MedianRatio < -0.3, "Loss", "Neutral"))
+# data$CN_status[is.na(data$CN_status)] <- "Neutral"  # drop them if preferred
+# data$CN_status <- factor(data$CN_status, levels = c("Gain", "Loss", "Neutral"))
+
+
+# Gene annotation (example positions, replace with relevant ones)
+# annot_genes <- data.frame(
+#   gene=c("MYC", "TP53"),
+#   pos=c(128748315, 7579472),
+#   label_y=2.5
+# )
+
+# Chromosome borders and centromeres
+chromosome_borders <- c(0, chr_arms$end[chr_arms$arm == "q"])
+chromosome_centrom <- (chr_arms$end[chr_arms$arm == "p"] + chr_arms$start[chr_arms$arm == "q"]) / 2
+
+# Plot
+cna_plot <- ggplot(data, aes(x=genom_pos$start, y=Ratio)) +
+  geom_hline(yintercept=0, linetype="solid", linewidth=0.7) +
+  # geom_ribbon(aes(ymin=ifelse(CN_status == "Loss", -1, 0), ymax=0), fill="orange", alpha=0.4) +
+  # geom_ribbon(aes(ymin=0, ymax=ifelse(CN_status == "Gain", 1.5, 0)), fill="green4", alpha=0.4) +
+  geom_point(aes(color=CN_status), alpha=0.4, size=0.5) +
+  # geom_point(aes(y = MedianRatio, color = "Segmented log2 ratio"), size = 0.2, alpha = 0.6) +
+  geom_point(aes(y = MedianRatio, shape = "Segmented log2 ratio"), color = "red", size  = 0.2, alpha = 0.7) +
+  scale_color_manual(
+  values = c(
+    "Gain" = "green4",
+    "Loss" = "orange",
+    "Neutral" = "steelblue1"
+    # "Segmented log2 ratio" = "red"
+    ),
+    name = "CNA status") +
+  # shape scale for the segmented‐profile points
+  scale_shape_manual(
+    name   = NULL,
+    values = c("Segmented log2 ratio" = 16)  # pick any shape 1–25
+  ) +
+  # geom_step(aes(y=MedianRatio), color="black", size=0.7, alpha=0.8) + # replace with actual segmentation if available
+  geom_hline(yintercept=c(-0.5, 0.5), linetype="dashed", alpha = 0.7) +
+  geom_vline(xintercept=chromosome_borders, linetype="solid", color="grey") +
+  geom_vline(xintercept=chromosome_centrom, linetype="dashed", color="grey") +
+  # geom_text(data=annot_genes, aes(x=pos, y=label_y, label=gene), angle=90, vjust=-0.5, size=3, color="black") +
+  guides(
+     color = guide_legend(order = 1,
+                          override.aes = list(size = 3, alpha = 1)),
+     shape = guide_legend(order = 2,
+                          override.aes = list(color = "red", size = 3, alpha = 1))
+   ) +
+  
+  # labs(y="Log2 Ratio", x="Chromosomes", title="Patient 04, Malignant – post-Biopsy (cell-ID: iUKE21.055)", color="CNA Status") +
+  # labs(y="Log2 Ratio", x="Chromosomes", title="Patient 04, Malignant – post-Biopsy (cell-ID: iUKE21.056)", color="CNA Status") +
+  # labs(y="Log2 Ratio", x="Chromosomes", title="Patient 13, Malignant – pre-Biopsy (cell-ID: iUKE21.057)", color="CNA Status") +
+  # labs(y="Log2 Ratio", x="Chromosomes", title="Patient 13, Malignant – post-Biopsy (cell-ID: iUKE21.058)", color="CNA Status") +
+  # labs(y="Log2 Ratio", x="Chromosomes", title="Patient 13, Malignant – post-Biopsy (cell-ID: iUKE21.059)", color="CNA Status") +
+  # labs(y="Log2 Ratio", x="Chromosomes", title="Patient 13, Malignant – post-Biopsy (cell-ID: iUKE21.060)", color="CNA Status") +
+  # labs(y="Log2 Ratio", x="Chromosomes", title="Patient 32, Malignant – pre-Biopsy (cell-ID: iUKE21.037)", color="CNA Status") +
+  # labs(y="Log2 Ratio", x="Chromosomes", title="Patient 32, Malignant – post-Biopsy (cell-ID: iUKE21.038)", color="CNA Status") +
+  # labs(y="Log2 Ratio", x="Chromosomes", title="Patient 33, Malignant – pre-Biopsy (cell-ID: iUKE21.039)", color="CNA Status") +
+  # labs(y="Log2 Ratio", x="Chromosomes", title="Patient 33, Malignant – pre-Biopsy (cell-ID: iUKE21.040)", color="CNA Status") +
+  # labs(y="Log2 Ratio", x="Chromosomes", title="Patient 71, Malignant – pre-Biopsy (cell-ID: iUKE21.088)", color="CNA Status") +
+  # labs(y="Log2 Ratio", x="Chromosomes", title="Patient 71, Malignant – post-Biopsy (cell-ID: iUKE21.089)", color="CNA Status") +
+  # labs(y="Log2 Ratio", x="Chromosomes", title="Patient 72, Benign – post-Biopsy (cell-ID: iUKE21.090)", color="CNA Status") +
+  # labs(y="Log2 Ratio", x="Chromosomes", title="Patient 75, Malignant – post-Biopsy (cell-ID: iUKE21.091)", color="CNA Status") +
+  # labs(y="Log2 Ratio", x="Chromosomes", title="Patient 76, Benign – pre-Biopsy (cell-ID: iUKE21.084)", color="CNA Status") +
+  # labs(y="Log2 Ratio", x="Chromosomes", title="Patient 76, Benign – pre-Biopsy (cell-ID: iUKE21.093)", color="CNA Status") +
+  # labs(y="Log2 Ratio", x="Chromosomes", title="Patient 76, Benign – post-Biopsy (cell-ID: iUKE21.085)", color="CNA Status") +
+  # labs(y="Log2 Ratio", x="Chromosomes", title="Patient 77, Malignant – pre-Biopsy (cell-ID: iUKE21.092)", color="CNA Status") +
+  # labs(y="Log2 Ratio", x="Chromosomes", title="Patient 77, Malignant – post-Biopsy (cell-ID: iUKE21.086)", color="CNA Status") +
+  labs(y="Log2 Ratio", x="Chromosomes", title="Female Genomic DNA – Healthy Control", color="CNA Status") +
+  
+  theme_bw() +
+  theme(
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(size = 11, hjust = 0.5, margin = margin(t= 5, b = 5), face = "bold"),
+    
+    # legend.position = "none",
+    legend.position = "top",
+    # legend.box          = "horizontal",        # arrange multiple legends side-by-side
+    # legend.box.spacing  = unit(0.8, "cm"),     # gap between the colour‐box and the shape‐box
+    # legend.spacing.x    = unit(0.5, "cm"),      # (optional) space between keys within each box
+    legend.text = element_text(size = 10),
+    legend.title = element_text(size = 10),
+    legend.key.size = unit(0.5, "lines"),
+    legend.box.margin = margin(b = -10),
+    
+    axis.text = element_text(size = 6.5),
+    axis.title = element_text(size = 10)
+    # plot.margin = margin(5, 10, 10, 10)   # top, right, bottom, left
+  ) +
+  guides(color = guide_legend(override.aes = list(size = 3))) +  # make legend dots bigger
+  scale_x_continuous(limits = c(0, cum_pos), breaks = chromosome_centrom, labels = chr_length$Chr) +
+  scale_y_continuous(limits = c(-3, 3), breaks = -3:3) +
+  annotation_custom(grobTree(textGrob("Simon Joosse (UKE)", x=0.99, y=0.01,
+                                      hjust=1, vjust=0,
+                                      gp=gpar(col="grey", fontsize=12, fontface="italic"))))
+
+
+# Save plot
+plot_filepath <- file.path(root_path, "CNA_plots", "cna_plot.png")
+ggsave(plot_filepath, plot = cna_plot, device = "png", width = 1200, height = 350, units = "px", dpi = 165)
+
+# Display plot
+#png("cna_plot.png", width = 600, height = 230, res = 300)
+print(cna_plot)
+#dev.off()
+
+rm(list = c(
+  ls(pattern = "filepath"), "root_path", 
+  "c", "cur_chr", "chr_length", "chr_arms", "cum_pos", "genom_pos",
+  "sort_order", "keep", "chromosome_borders", "chromosome_centrom",
+   "cna_plot"
+))
+
+
+```

@@ -1,0 +1,62 @@
+# Loading packages
+```{r}
+pacman::p_load(conflicted,          # make it first always to avoid package conflicts
+               broom,
+               broom.mixed,
+               boot,
+               buildmer,
+               car,
+               devEMF,              # export vector quality plots
+               DHARMa, performance,
+               fitdistrplus,        # For fitdist(), plotdist(): estimate distribution parameters and plot them
+               flextable, 
+               formattable, 
+               ggbeeswarm,
+               ggalluvial, 
+               GGally,             # For ggpairs()
+               ggbreak, 
+               GLMMadaptive, glmmTMB,
+               ggpubr,             # For stat_summary
+               gridExtra,
+               glue,
+               here,
+               irr,                # For Cohen's kappa     
+               knitr,
+               lme4,
+               mice,               # imputating missing values
+               multcomp,
+               ordinal,
+               purrr,
+               patchwork,          # For combining plots
+               performance,
+               pROC,
+               pscl,               # For zeroinfl()
+               psych,              # for describe()
+               readxl, 
+               rlang,
+               rstatix,
+               scales,
+               stats,              # For Wilcoxon test
+               tau,                # For Kendall's tau
+               tibble,
+               tidyverse,
+               vcd,                # For McNemar test
+               wrappedtools,
+               writexl)
+
+conflicts_prefer(dplyr::filter)
+conflicts_prefer(dplyr::select)
+conflicts_prefer(dplyr::recode)
+conflicts_prefer(formattable::comma)
+conflicts_prefer(formattable::percent)
+conflicts_prefer(readxl::read_xlsx)
+conflicts_prefer(dplyr::slice)
+conflicts_prefer(boot::logit)
+# conflicts_prefer(car::logit)
+
+# Ensure flextables are printed in Quarto Word
+# knit_print.flextable <- function(x, ...) {
+#   knitr::knit_print(as_flextable(x))
+#}
+
+```

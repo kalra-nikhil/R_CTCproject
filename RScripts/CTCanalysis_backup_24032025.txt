@@ -1496,6 +1496,10 @@ cat("Log-likelihood:", fit_zinb$loglik, "\n")
 
 ```
 
+```{r}
+
+```
+
 # Fit Poisson Mixed-Effects Model & Zero-Inflated Poisson Model
 
 ```{r}
@@ -2288,436 +2292,180 @@ tables$Model   # Flextable for Model Type-based grouping
 # Final plots after modeling
 
 ```{r}
-modeldata$all_subjects |> 
-  ggplot(aes(Method, CTC_count,  color= Timepoint)) +
+modeldata$all_groups |> 
+  ggplot(aes(Method, Count,  color= Time)) +
   # geom_beeswarm(dodge.width = 0.75, cex = 0.5)
   geom_violin(draw_quantiles = c(0.25, 0.5, 0.75))
 
-modeldata$all_subjects |> 
-  ggplot(aes(Timepoint, CTC_count,  color= Method)) +
+modeldata$all_groups |> 
+  ggplot(aes(Time, Count,  color= Method)) +
   # geom_beeswarm(dodge.width = 0.75, cex = 0.5)
   geom_violin(draw_quantiles = c(0.25, 0.5, 0.75))
 
 ```
-# Testing the significance of ZINB model testing
+
 ```{r}
-# 1) Compute observed frequencies
-observed_freq <- table(factor(modeldata$all_subjects$CTC_count, levels = 0:max(modeldata$all_subjects$CTC_count)))
+# Define the Zero-Inflated Poisson (ZIP) functions
 
-# 2) Compute expected (theoretical) frequencies from the ZINB model
-#    Multiply model-predicted probabilities by the total sample size
-theoretical_freq <- length(modeldata$all_subjects$CTC_count) * sapply(
-  0:max(modeldata$all_subjects$CTC_count),
-  function(x) dzinb(x, mu_est, size_est, pi_est)
-)
-
-# 3) Perform the Chi-square goodness-of-fit test
-chi_sq_stat <- sum((observed_freq - theoretical_freq)^2 / theoretical_freq)
-
-# 4) Compute degrees of freedom
-#    For a simple GOF test with fully specified parameters, 
-#    df often = (# of bins) - 1 - (# of estimated parameters).
-#    However, for zero-inflated models, the exact df can vary
-#    depending on how you account for constraints and zero inflation.
-df <- length(observed_freq) - 1 - 3  # subtracting 3 for (mu, size, pi) as an example
-
-p_value <- 1 - pchisq(chi_sq_stat, df)
-
-cat("Chi-square statistic:", chi_sq_stat, "\n")
-cat("Degrees of freedom:", df, "\n")
-cat("p-value:", p_value, "\n")
-
-""" 
-results indicate that there is a statistically significant difference between the observed frequencies and the frequencies predicted by your ZINB model on the all_subjects dataset. Specifically, the chi‑square statistic is 155.83 with 4 degrees of freedom, which yields a p‑value effectively 0. This p‑value is well below any common significance threshold (e.g., 0.05), meaning that you can reject the null hypothesis that the ZINB model’s predicted counts match the empirical counts.
-
-In other words, the model trained on the cancer‑positive dataset does not predict the count distribution well when applied to all subjects. This significant difference may be due to differences in the underlying data structure between the cancer‑positive subset and the full dataset (which also includes cancer‑negative subjects).
-
-You might consider re‐evaluating or re‐fitting your model on the full dataset if your goal is to generalize to all subjects, or further investigate the differences between the subgroups. 
-"""
-
-```
-
-# ZINB model testing on complete dataset
-```{r}
-#############################
-# 1. Load Libraries & Define ZINB Functions
-#############################
-
-
-# If you need the same ZINB distribution functions from your training script:
-dzinb <- function(x, mu, size, pi) {
-  ifelse(x == 0, 
-         pi + (1 - pi) * dnbinom(0, mu = mu, size = size), 
-         (1 - pi) * dnbinom(x, mu = mu, size = size))
+# Density function
+dzip <- function(x, lambda, pi) {
+  x <- floor(x)
+  ifelse(x < 0, 0, 
+         ifelse(x == 0, pi + (1 - pi) * dpois(0, lambda), 
+                (1 - pi) * dpois(x, lambda)))
 }
 
-pzinb <- function(q, mu, size, pi) {
-  # For each value, CDF is a mixture of the structural zero component and NB component
-  result <- numeric(length(q))
-  for (i in seq_along(q)) {
-    if (q[i] < 0) {
-      result[i] <- 0
-    } else {
-      result[i] <- pi + (1 - pi) * pnbinom(q[i], mu = mu, size = size)
-    }
-  }
+# Cumulative distribution function
+pzip <- function(q, lambda, pi) {
+  q <- floor(q)
+  ifelse(q < 0, 0, 
+         pi + (1 - pi) * ppois(q, lambda))
+}
+
+# Quantile function
+qzip <- function(p, lambda, pi) {
+  result <- numeric(length(p))
+  p0 <- pi + (1 - pi) * dpois(0, lambda)
+  p_adj <- pmax(pmin((p - pi) / (1 - pi), 1), 0)
+  result <- ifelse(p <= 0, 0, 
+                   ifelse(p >= 1, Inf, 
+                          ifelse(p <= p0, 0, 
+                                 qpois(p_adj, lambda))))
   return(result)
 }
 
-qzinb <- function(p, mu, size, pi) {
-  ifelse(p <= pi, 
-         0, 
-         qnbinom((p - pi) / (1 - pi), mu = mu, size = size))
+# Define the negative log-likelihood function for ZIP
+zip_nll <- function(params, data) {
+  lambda <- params[1]
+  pi <- params[2]
+  -sum(log(dzip(data, lambda, pi)))
 }
 
-#############################
-# 2. Retrieve Best ZINB Model Parameters
-#############################
-# Suppose you have already fit the ZINB model on the cancer-positive dataset:
-#    fit_zinb <- fitdist(..., "dzinb", start = list(...))
-#    # or loaded from file with: load("fit_zinb.RData")
+# Fit the ZIP model using optim()
+fit_zip_optim <- optim(c(1, 0.5), zip_nll, 
+                       data = ctc_cap, 
+                       method = "L-BFGS-B", 
+                       lower = c(0, 0), 
+                       upper = c(Inf, 1))
 
-# Extract parameter estimates from the best ZINB model
-mu_est       <- fit_zinb$estimate["mu"]
-size_est     <- fit_zinb$estimate["size"]
-pi_est_zinb  <- fit_zinb$estimate["pi"]
+# Extract the estimated parameters from optim
+lambda_optim <- fit_zip_optim$par[1]
+pi_optim <- fit_zip_optim$par[2]
 
-#############################
-# 3. Prepare the all_subjects Data
-#############################
-# Assume 'modeldata$all_subjects' is already in your R environment
-# and the relevant count variable is 'CTC_count' (change if named differently).
-ctc_all <- modeldata$all_subjects$CTC_count
+# Print the results from optim
+cat("\nZIP Model (optim):\n")
+cat("Lambda (Poisson mean):", lambda_optim, "\n")
+cat("Pi (Zero-inflation probability):", pi_optim, "\n")
 
-#############################
-# 4. Goodness-of-Fit on all_subjects
-#############################
-# Observed frequencies
-observed_freq_all <- table(factor(ctc_all, levels = 0:max(ctc_all)))
+# Fit the ZIP model using fitdist (for comparison and diagnostics)
+fit_zip_fitdist <- fitdist(ctc_cap, distr = dzip, 
+                           start = list(lambda = lambda_optim, pi = pi_optim), 
+                           lower = c(0, 0), upper = c(Inf, 1))
 
-# Theoretical frequencies using the best ZINB parameters
-theoretical_freq_zinb_all <- length(ctc_all) * sapply(
-  0:max(ctc_all),
-  function(x) dzinb(x, mu_est, size_est, pi_est_zinb)
-)
+# Display the estimated parameters from fitdist
+cat("\nZIP Model (fitdist):\n")
+print(fit_zip_fitdist$estimate)
 
-# Chi-square statistic
-chisq_stat_zinb_all <- sum(
-  (observed_freq_all - theoretical_freq_zinb_all)^2 / theoretical_freq_zinb_all
-)
+# Plot the fit
+plot(fit_zip_fitdist)
 
-# Degrees of freedom for a GOF test. 
-# Since we're applying previously fit parameters, you might use:
-df_all <- length(observed_freq_all) - 1  # or minus the # of estimated params if desired
+# Diagnostics
+cat("AIC:", fit_zip_fitdist$aic, "\nBIC:", fit_zip_fitdist$bic, 
+    "\nLog-likelihood:", fit_zip_fitdist$loglik)
 
-# p-value
-p_value_zinb_all <- 1 - pchisq(chisq_stat_zinb_all, df_all)
-
-cat("ZINB Model Fit on all_subjects:\n")
-cat("Chi-square:", chisq_stat_zinb_all, "\n")
-cat("df:", df_all, "\n")
-cat("p-value:", p_value_zinb_all, "\n\n")
-
-#############################
-# 5. Visualize PMF Comparison
-#############################
-# Empirical PMF from all_subjects
-x_vals_all <- 0:max(ctc_all)
-empirical_probs_all <- as.numeric(observed_freq_all) / length(ctc_all)
-
-# Theoretical PMF from ZINB
-zinb_probs_all <- sapply(x_vals_all, function(x) dzinb(x, mu_est, size_est, pi_est_zinb))
-
-# Combine into a single data frame for plotting
-pmf_data_all <- data.frame(
-  x = rep(x_vals_all, 2),
-  probability = c(empirical_probs_all, zinb_probs_all),
-  Distribution = rep(c("Empirical", "ZINB"), each = length(x_vals_all))
-)
-
-# PMF Plot
-
-pmf_plot_all <- ggplot(pmf_data_all, aes(x = x, y = probability, fill = Distribution)) +
-  geom_bar(stat = "identity", position = "dodge", alpha = 0.8) +
-  scale_x_continuous(breaks = x_vals_all) +
-  labs(
-    title = "PMF Comparison on all_subjects",
-    x = "Count Value",
-    y = "Probability"
-  ) +
-  theme_minimal()
-
-print(pmf_plot_all)
-
-cat("Done! The script has tested the best ZINB model on all_subjects.\n")
+# Compare optim and fitdist results
+cat("\nComparison of Estimates:\n")
+cat("Lambda (optim):", lambda_optim, "\n")
+cat("Lambda (fitdist):", fit_zip_fitdist$estimate["lambda"], "\n")
+cat("Pi (optim):", pi_optim, "\n")
+cat("Pi (fitdist):", fit_zip_fitdist$estimate["pi"], "\n")
 
 ```
 
 ```{r}
-#############################
-# 1. Load Libraries & Data
-#############################
-# Assume that modeldata is already loaded and contains:
-# modeldata$all_subjects with columns:
-#   - CTC_count: the count outcome
-#   - Timepoint: time at which measurement was taken
-#   - Cancer: cancer status (e.g., "positive" or "negative")
-#   - Method: the method used (e.g., "Punch" etc.)
-#   - Patient_ID: unique patient identifier
+# Load required packages
+library(fitdistrplus)
 
-all_data <- modeldata$all_subjects
+# Define the Zero-Inflated Negative Binomial (ZINB) functions
 
-# Ensure the relevant columns are factors as needed
-all_data <- all_data %>%
-  mutate(
-    Cancer = as.factor(Cancer),
-    Timepoint = as.factor(Timepoint),
-    Method = as.factor(Method),
-    Patient_ID = as.factor(Patient_ID)
-  )
-
-#############################
-# 2. Exploratory Analysis
-#############################
-# Histogram of CTC_count by Cancer status
-hist_plot <- ggplot(all_data, aes(x = CTC_count)) +
-  geom_histogram(binwidth = 1, fill = "steelblue", color = "black", alpha = 0.7, boundary = 0) +
-  facet_wrap(~ Cancer, scales = "free_y") +
-  labs(title = "Histogram of CTC_count by Cancer Status",
-       x = "CTC_count",
-       y = "Frequency") +
-  theme_minimal()
-print(hist_plot)
-
-# Density plot of CTC_count by Timepoint
-density_plot <- ggplot(all_data, aes(x = CTC_count, color = Timepoint)) +
-  geom_density() +
-  labs(title = "Density Plot of CTC_count by Timepoint",
-       x = "CTC_count",
-       y = "Density") +
-  theme_minimal()
-print(density_plot)
-
-#############################
-# 3. Fit ZINB Mixed-Effects Models using glmmTMB
-#############################
-# Model 1: Fixed effects only (Timepoint + Cancer + Method) with random intercept for Patient_ID
-zinb_mixed <- glmmTMB(
-  CTC_count ~ Timepoint + Cancer + Method + (1 | Patient_ID),
-  data = all_data,
-  family = nbinom2,            # Negative Binomial distribution
-  ziformula = ~1               # Constant zero-inflation probability
-)
-
-# Model 2: With full interactions among Timepoint, Cancer, and Method
-zinb_mixed_int <- glmmTMB(
-  CTC_count ~ Timepoint * Cancer * Method + (1 | Patient_ID),
-  data = all_data,
-  family = nbinom2,
-  ziformula = ~1
-)
-
-# Display summaries of both models
-cat("\nSummary of ZINB mixed model (no interactions):\n")
-print(summary(zinb_mixed))
-
-cat("\nSummary of ZINB mixed model (with interactions):\n")
-print(summary(zinb_mixed_int))
-
-#############################
-# 4. Compare Models (Testing Interactions)
-#############################
-# Likelihood ratio test comparing the model without interactions vs. with interactions
-model_comparison <- anova(zinb_mixed, zinb_mixed_int)
-cat("\nLikelihood Ratio Test Comparing Models:\n")
-print(model_comparison)
-# A significant p-value here indicates that including the interaction(s) improves the model.
-
-#############################
-# 5. Diagnostic Checks with DHARMa
-#############################
-# Choose the preferred model based on the comparison (for example, the interaction model if it is significantly better)
-# Here we use the model with interactions:
-simulationOutput <- simulateResiduals(zinb_mixed_int, n = 250)
-plot(simulationOutput)  # This plot will show residuals, uniformity, and potential outliers
-
-#############################
-# 6. Visualization: Observed vs Predicted Counts
-#############################
-# Compute predicted (marginal) counts from the interaction model
-all_data$predicted <- predict(zinb_mixed_int, type = "response")
-
-# Scatter plot of observed vs. predicted counts
-pred_vs_obs <- ggplot(all_data, aes(x = predicted, y = CTC_count)) +
-  geom_point(alpha = 0.6, color = "darkgreen") +
-  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "red") +
-  labs(title = "Observed vs Predicted CTC_count",
-       x = "Predicted CTC_count",
-       y = "Observed CTC_count") +
-  theme_minimal()
-print(pred_vs_obs)
-
-# Alternatively, compare the overall distributions:
-# Compute empirical PMF for the full dataset
-x_vals <- 0:max(all_data$CTC_count)
-empirical_freq <- table(factor(all_data$CTC_count, levels = x_vals))
-empirical_probs <- as.numeric(empirical_freq) / length(all_data$CTC_count)
-
-# For the predicted PMF, we need the fitted parameters. Here, we extract the overall fixed and random parts.
-# However, for a mixed model with covariates, one approach is to predict at the marginal (population-averaged) level.
-# We'll use the predict() function on the original data to simulate the predicted PMF.
-# For illustration, we can create a density estimate of predicted counts.
-predicted_density <- density(all_data$predicted)
-
-pmf_data <- data.frame(
-  x = x_vals,
-  Empirical = empirical_probs
-)
-
-# Plot empirical distribution as bars and overlay the density of predicted counts
-pmf_plot <- ggplot() +
-  geom_bar(data = pmf_data, aes(x = x, y = Empirical), stat = "identity",
-           fill = "skyblue", alpha = 0.7, width = 0.8) +
-  geom_line(data = data.frame(x = predicted_density$x, y = predicted_density$y),
-            aes(x = x, y = y * max(empirical_probs) / max(predicted_density$y)), 
-            color = "darkred", size = 1) +
-  labs(title = "Empirical PMF vs. Predicted Density",
-       x = "CTC_count",
-       y = "Probability / Density") +
-  theme_minimal()
-print(pmf_plot)
-
-#############################
-# 7. End of Script and Next Steps
-#############################
-cat("\nScript complete!\n")
-cat("Next steps:\n")
-cat("- Review the diagnostic plots from DHARMa to check for model adequacy.\n")
-cat("- If the likelihood ratio test shows significant interactions, interpret the interaction coefficients.\n")
-cat("- Consider plotting estimated marginal means (using packages like emmeans or sjPlot) for further insights.\n")
-
-```
-
-# ZINB prediction plot
-```{r}
-#############################
-# 1. Load Libraries & Data
-#############################
-
-# Assume modeldata is already loaded and contains all_subjects with these columns:
-#   - CTC_count: outcome (counts)
-#   - Timepoint: time point of measurement
-#   - Cancer: cancer status (e.g., "positive", "negative")
-#   - Method: method used (e.g., "Punch", "Method02", etc.)
-#   - Patient_ID: unique patient identifier
-
-all_data <- modeldata$all_subjects
-
-# Ensure factors are set properly:
-all_data <- all_data %>%
-  mutate(
-    Cancer = as.factor(Cancer),
-    Timepoint = as.factor(Timepoint),
-    Method = as.factor(Method),
-    Patient_ID = as.factor(Patient_ID)
-  )
-
-#############################
-# 2. Fit the Preferred Model on the Complete Dataset
-#############################
-# (Assuming this model was already determined as best based on previous comparisons)
-zinb_mixed <- glmmTMB(
-  CTC_count ~ Timepoint + Cancer + Method + (1 | Patient_ID),
-  data = all_data,
-  family = nbinom2,   # Negative binomial
-  ziformula = ~1,     # Constant zero-inflation probability
-  dispformula = ~1    # Constant dispersion parameter
-)
-
-# Display the model summary for reference
-cat("\nSummary of the preferred model (trained on all_subjects):\n")
-print(summary(zinb_mixed))
-
-#############################
-# 3. Create Subset Datasets
-#############################
-positive_data <- all_data %>% filter(Cancer == "positive")
-negative_data <- all_data %>% filter(Cancer == "negative")
-
-#############################
-# 4. Generate Predictions on the Subsets
-#############################
-# Use the predict function to get model predictions (marginal predictions)
-positive_data <- positive_data %>% mutate(predicted = predict(zinb_mixed, newdata = positive_data, type = "response"))
-negative_data <- negative_data %>% mutate(predicted = predict(zinb_mixed, newdata = negative_data, type = "response"))
-
-#############################
-# 5. Compute Performance Metrics (e.g., RMSE)
-#############################
-rmse <- function(obs, pred) {
-  sqrt(mean((obs - pred)^2))
+# Density function for ZINB
+dzinb <- function(x, mu, theta, pi) {
+  x <- floor(x)
+  ifelse(x < 0, 0, 
+         ifelse(x == 0, pi + (1 - pi) * dnbinom(0, size = theta, mu = mu), 
+                (1 - pi) * dnbinom(x, size = theta, mu = mu)))
 }
 
-rmse_positive <- rmse(positive_data$CTC_count, positive_data$predicted)
-rmse_negative <- rmse(negative_data$CTC_count, negative_data$predicted)
+# Cumulative distribution function for ZINB
+pzinb <- function(q, mu, theta, pi) {
+  q <- floor(q)
+  ifelse(q < 0, 0, 
+         pi + (1 - pi) * pnbinom(q, size = theta, mu = mu))
+}
 
-cat("\nRMSE for cancer-positive subset:", rmse_positive, "\n")
-cat("RMSE for cancer-negative subset:", rmse_negative, "\n")
+# Quantile function for ZINB
+qzinb <- function(p, mu, theta, pi) {
+  result <- numeric(length(p))
+  p0 <- pi + (1 - pi) * dnbinom(0, size = theta, mu = mu)
+  p_adj <- pmax(pmin((p - pi) / (1 - pi), 1), 0)
+  result <- ifelse(p <= 0, 0, 
+                   ifelse(p >= 1, Inf, 
+                          ifelse(p <= p0, 0, 
+                                 qnbinom(p_adj, size = theta, mu = mu))))
+  return(result)
+}
 
-#############################
-# 6. Visualization: Observed vs. Predicted Counts for Each Subset
-#############################
-# Scatter plot for cancer-positive subjects
-plot_positive <- ggplot(positive_data, aes(x = predicted, y = CTC_count)) +
-  geom_point(alpha = 0.6, color = "blue") +
-  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "red") +
-  labs(title = "Observed vs. Predicted CTC_count (Cancer Positive)",
-       x = "Predicted CTC_count",
-       y = "Observed CTC_count") +
-  theme_minimal()
-print(plot_positive)
+# Define the negative log-likelihood function for ZINB
+zinb_nll <- function(params, data) {
+  mu <- params[1]
+  theta <- params[2]
+  pi <- params[3]
+  # Ensure parameters are within valid ranges
+  if (mu <= 0 || theta <= 0 || pi < 0 || pi > 1) return(Inf)
+  -sum(log(dzinb(data, mu, theta, pi)))
+}
 
-# Scatter plot for cancer-negative subjects
-plot_negative <- ggplot(negative_data, aes(x = predicted, y = CTC_count)) +
-  geom_point(alpha = 0.6, color = "darkgreen") +
-  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "red") +
-  labs(title = "Observed vs. Predicted CTC_count (Cancer Negative)",
-       x = "Predicted CTC_count",
-       y = "Observed CTC_count") +
-  theme_minimal()
-print(plot_negative)
+# Fit the ZINB model using optim()
+fit_zinb_optim <- optim(c(1, 1, 0.5), zinb_nll, 
+                        data = ctc_cap, 
+                        method = "L-BFGS-B", 
+                        lower = c(0, 0, 0), 
+                        upper = c(Inf, Inf, 1))
 
-#############################
-# 7. (Optional) Additional Diagnostics
-#############################
-# You can also compare the empirical and predicted distributions by, for example, creating a PMF plot.
-# Here is an example for the cancer-positive subset:
+# Extract the estimated parameters from optim
+mu_optim <- fit_zinb_optim$par[1]
+theta_optim <- fit_zinb_optim$par[2]
+pi_optim <- fit_zinb_optim$par[3]
 
-# Compute observed frequencies for positive subset:
-x_vals_pos <- 0:max(positive_data$CTC_count)
-observed_freq_pos <- table(factor(positive_data$CTC_count, levels = x_vals_pos))
-empirical_probs_pos <- as.numeric(observed_freq_pos) / nrow(positive_data)
+# Print the results from optim
+cat("\nZINB Model (optim):\n")
+cat("Mu (Negative Binomial mean):", mu_optim, "\n")
+cat("Theta (Dispersion parameter):", theta_optim, "\n")
+cat("Pi (Zero-inflation probability):", pi_optim, "\n")
 
-# Create a data frame for plotting:
-pmf_data_pos <- data.frame(
-  x = x_vals_pos,
-  Empirical = empirical_probs_pos
-)
+# Fit the ZINB model using fitdist (for comparison and diagnostics)
+fit_zinb_fitdist <- fitdist(ctc_cap, distr = dzinb, 
+                            start = list(mu = mu_optim, theta = theta_optim, pi = pi_optim), 
+                            lower = c(0, 0, 0), 
+                            upper = c(Inf, Inf, 1))
 
-# Plot the empirical PMF:
-pmf_plot_pos <- ggplot(pmf_data_pos, aes(x = x, y = Empirical)) +
-  geom_bar(stat = "identity", fill = "skyblue", alpha = 0.7) +
-  labs(title = "Empirical PMF for Cancer-Positive Subset",
-       x = "CTC_count",
-       y = "Probability") +
-  theme_minimal()
-print(pmf_plot_pos)
+# Display the estimated parameters from fitdist
+cat("\nZINB Model (fitdist):\n")
+print(fit_zinb_fitdist$estimate)
 
-# Similar steps can be repeated for the cancer-negative subset if desired.
+# Plot the fit
+plot(fit_zinb_fitdist)
 
-cat("\nModel testing on subset datasets complete! Review the RMSE values and plots to assess model efficiency across subsets.\n")
+# Diagnostics
+cat("AIC:", fit_zinb_fitdist$aic, "\nBIC:", fit_zinb_fitdist$bic, 
+    "\nLog-likelihood:", fit_zinb_fitdist$loglik)
 
+# Compare optim and fitdist results
+cat("\nComparison of Estimates:\n")
+cat("Mu (optim):", mu_optim, "\n")
+cat("Mu (fitdist):", fit_zinb_fitdist$estimate["mu"], "\n")
+cat("Theta (optim):", theta_optim, "\n")
+cat("Theta (fitdist):", fit_zinb_fitdist$estimate["theta"], "\n")
+cat("Pi (optim):", pi_optim, "\n")
+cat("Pi (fitdist):", fit_zinb_fitdist$estimate["pi"], "\n")
 ```
-
-```
-

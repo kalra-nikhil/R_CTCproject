@@ -1,0 +1,191 @@
+# ZINB regression with imputated data
+```{r}
+#| eval: false
+.initial_objects <- ls()
+
+# Define clinical variables
+clinical_vars <- c("Menopause", "Stanze_type",
+                   "T_stage_f", "N_stage_f", "G_stage_f",
+                   "patho_ER_f", "patho_PR_f", "patho_HER2_f", "patho_Ki67_f")
+
+# Step 1: Prepare and clean dataset
+df_all <- data |>
+    select(Patient_ID, Cancer, Menopause, Stanze_type, Method, Timepoint, CTC_count, ends_with("_f")) |>
+    filter(Cancer == "positive") |>
+    mutate(
+        CTC_count = as.numeric(CTC_count),
+        across(.cols = contains("_f"), .fns = as.character),
+        
+        # Clinical recoding
+        Menopause = case_when(
+            Menopause %in% c("premenopausal", "perimenopausal") ~ "premenopausal",
+            Menopause == "postmenopausal" ~ "postmenopausal",
+            TRUE ~ NA_character_
+        ),
+        T_stage_f = case_when(
+            T_stage_f %in% c("Tis", "T1+T2") ~ "Tis+T1+T2",
+            T_stage_f == "T3+T4" ~ "T3+T4",
+            TRUE ~ NA_character_
+        ),
+        N_stage_f = case_when(
+            N_stage_f %in% c("N0", "Nx") ~ "neg",
+            N_stage_f == "N1" ~ "pos",
+            TRUE ~ NA_character_
+        ),
+        M_stage_f = case_when(
+            M_stage_f %in% c("M0", "MX") ~ "neg",
+            M_stage_f == "M1" ~ "pos",
+            TRUE ~ NA_character_
+        )
+    ) |>
+    mutate(
+        # Convert to factors with specified levels
+        patho_ER_f = factor(patho_ER_f, levels = c("low (<=15%)", "high (>15%)")),
+        patho_PR_f = factor(patho_PR_f, levels = c("low (<=15%)", "high (>15%)")),
+        patho_HER2_f = factor(patho_HER2_f, levels = c("neg", "pos")),
+        patho_Ki67_f = factor(patho_Ki67_f, levels = c("low (<=15%)", "high (>15%)")),
+        T_stage_f = factor(T_stage_f, levels = c("Tis+T1+T2", "T3+T4")),
+        N_stage_f = factor(N_stage_f, levels = c("neg", "pos")),
+        M_stage_f = factor(M_stage_f, levels = c("neg", "pos")),
+        G_stage_f = factor(G_stage_f, levels = c("G1+G2", "G3")),
+        Timepoint = factor(Timepoint, levels = c("pre_biopsy", "post_biopsy")),
+        Method = factor(Method, levels = c("Method01", "Method02")),
+        Menopause = factor(Menopause, levels = c("premenopausal", "postmenopausal")),
+        Stanze_type = factor(Stanze_type, levels = c("Punch", "Vacuum"))
+    ) |>
+    mutate(across(where(is.character), as.factor)) |>
+    select(where(~ mean(is.na(.)) <= 0.5))
+
+# Step 2: Multiple imputation
+methods <- make.method(df_all)
+
+# logreg failed; polyreg is more stable for unordered factors and uses multinomial models
+methods[c("patho_ER_f", "patho_PR_f", "patho_HER2_f", "patho_Ki67_f", "T_stage_f", "N_stage_f", "G_stage_f")] <- "polyreg"
+
+
+imp <- mice(df_all, m = 20, method = methods, seed = 100)
+
+# Step 2.1: Fit full model with all clinical variables (before selecting one by one)
+full_formula <- as.formula(
+  paste0("CTC_count ~ Timepoint + Method + ",
+         paste(clinical_vars, collapse = " + "),
+         " + (1 | Patient_ID)")
+)
+
+full_model_fit <- with(imp, glmmTMB(
+  formula = full_formula,
+  ziformula = ~ Timepoint + Method,
+  family = nbinom2
+))
+
+# Print full model summary with all variables
+cat("\n--- Summary of Full Model (with all clinical variables) ---\n")
+summary(pool(full_model_fit), conf.int = TRUE)
+
+# Step 3: Fit base model (no clinical vars)
+base_model_fit <- with(imp, glmmTMB(
+  CTC_count ~ Timepoint + Method + (1 | Patient_ID),
+  ziformula = ~ Timepoint + Method,
+  family = nbinom2
+))
+
+# Step 4: Compare each clinical variable one by one
+results <- map_dfr(clinical_vars, function(var) {
+  message("Processing variable: ", var)
+  tryCatch({
+    model_formula <- as.formula(paste0("CTC_count ~ Timepoint + Method + ", var, " + (1 | Patient_ID)"))
+    model_full <- with(imp, glmmTMB(
+      model_formula,
+      ziformula = ~ Timepoint + Method,
+      family = nbinom2
+    ))
+    
+    pooled_full <- pool(model_full)
+    model_summary <- summary(pooled_full)
+
+    # Attempt to extract p-value from any row matching the variable name
+    match_row <- grep(var, model_summary$term, fixed = TRUE)
+    
+    if (length(match_row) == 0) {
+      stop("Term not found in pooled summary")
+    }
+
+    tibble(
+      variable = var,
+      AIC_base = mean(sapply(base_model_fit$analyses, AIC)),
+      AIC_full = mean(sapply(model_full$analyses, AIC)),
+      delta_AIC = AIC_base - AIC_full,
+      LRT_p = model_summary$p.value[match_row[1]]
+    )
+  }, error = function(e) {
+    message("❌ Model failed for: ", var, " — ", e$message)
+    tibble(variable = var, AIC_base = NA, AIC_full = NA, delta_AIC = NA, LRT_p = NA)
+  })
+})
+
+
+results_df <- results %>% arrange(LRT_p)
+print(results_df)
+
+# Step 5: Select best predictors (LRT p < 0.1)
+selected_vars <- results_df %>%
+  filter(!is.na(LRT_p), LRT_p < 0.2) %>%
+  pull(variable)
+
+# Step 6: Fit final multivariable model on imputed data
+final_formula <- as.formula(
+  paste0("CTC_count ~ Timepoint + Method + ",
+         paste(selected_vars, collapse = " + "),
+         " + (1 | Patient_ID)")
+)
+
+final_model_fit <- with(imp, glmmTMB(
+  formula = final_formula,
+  ziformula = ~ Timepoint + Method,
+  family = nbinom2
+))
+
+# Step 7: Pool and summarize final model
+final_model_summary <- pool(final_model_fit)
+summary(final_model_summary)
+
+# Step 8: Check multicollinearity (on 1 completed dataset for diagnostics)
+df_complete <- complete(imp, 1)
+
+vif_formula <- as.formula(
+  paste0("CTC_count ~ ",
+         paste(c("Timepoint", "Method", selected_vars), collapse = " + "))
+)
+
+vif_model <- glm(vif_formula, family = "poisson", data = df_complete)
+vif(vif_model)
+
+# Optional: Pseudo-R2
+performance::r2(glmmTMB(
+  formula = final_formula,
+  ziformula = ~ Timepoint + Method,
+  family = nbinom2,
+  data = df_complete
+))
+
+# Optional: Diagnostic plot
+plot(
+  predict(glmmTMB(final_formula, ziformula = ~ Timepoint + Method, family = nbinom2, data = df_complete)),
+  resid(glmmTMB(final_formula, ziformula = ~ Timepoint + Method, family = nbinom2, data = df_complete), type = "pearson")
+)
+
+# Dharma residual plot
+sim_res <- simulateResiduals(glmmTMB(
+     formula = final_formula,
+     ziformula = ~ Timepoint + Method,
+     family = nbinom2,
+     data = df_complete
+ ))
+ 
+plot(sim_res)
+
+
+rm(list = setdiff(ls(), .initial_objects))
+gc()
+
+```

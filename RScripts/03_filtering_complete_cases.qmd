@@ -1,0 +1,36 @@
+# Selecting complete cases
+```{r}
+# Define staging identifiers
+identifiers <- c("T", "N", "M", "G", "L", "V", "n", "R")
+
+# Step 1: Create staging and pathology columns
+rawdata <- biopsydata |>
+  select(-contains(c("_2023","_2025"))) |> 
+  mutate(
+    patho_ER = str_extract(Pathology, "ER\\s*[><=]?\\s*\\d+%?") |>
+      str_remove_all("ER\\s*[><=]?\\s*") |> as.integer(),
+    patho_PR = str_extract(Pathology, "PR\\s*[><=]?\\s*\\d+%?") |>
+      str_remove_all("PR\\s*[><=]?\\s*") |> as.integer(),
+    patho_HER2 = str_extract(Pathology, "HER2 \\D{3}") |>
+      str_remove("HER2 "),
+    patho_Ki67 = str_extract(Pathology, "Ki67\\s*[<=>]?\\s*\\d+%?") |>
+      str_remove_all("Ki67\\s*[<=>]?\\s*|%") |> as.integer(),
+    Staging = replace_na(Staging, "")
+  )
+
+# Step 2: Add staging columns (e.g., T_stage, N_stage, etc.)
+rawdata <- bind_cols(
+  rawdata,
+  map_dfc(identifiers, ~ tibble(!!paste0(.x, "_stage") := str_extract(rawdata$Staging, paste0(.x, "[A-Za-z0-9]{1}")) |>
+                                   str_replace_all("^.*?(\\w)$", "\\1")))
+) |>
+  mutate(
+    complete = case_when(
+      Stanze_type == "Not_received" | Cell_Category == "Epithelial" ~ "no",
+      TRUE ~ "yes"
+    )
+  )
+
+rm(identifiers)
+
+```

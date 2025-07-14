@@ -1,0 +1,183 @@
+# PMF plot : Poisson vs ZINB
+```{r}
+# Set up environment tracking
+.initial_objects <- ls()
+
+# --- Load Libraries ---
+library(dplyr)
+library(fitdistrplus)
+library(ggplot2)
+
+# --- Data Preparation ---
+modeldata <- data |>
+    mutate(Patient_ID = factor(Patient_ID)) |> 
+    select(Patient_ID:Stanze_type, Method, Timepoint, CTC_count, contains("_f")) |> 
+    split(~ Cancer) |>
+    (\(tbl_list) {append(tbl_list, list(all_subjects = bind_rows(tbl_list) |> as_tibble()))})()
+
+modeldata_t <- modeldata$positive
+modeldata_t <- subset(modeldata_t, !is.na(CTC_count) & CTC_count >= 0)
+
+# --- Custom Distributions ---
+dzip <- function(x, lambda, pi) {
+    if (!length(x)) return(numeric(0))
+    if (lambda < 0 || pi < 0 || pi > 1) return(rep(NA_real_, length(x)))
+    ifelse(x == 0, pi + (1 - pi) * dpois(0, lambda), (1 - pi) * dpois(x, lambda))
+}
+pzip <- function(q, lambda, pi) {
+    if (!length(q)) return(numeric(0))
+    if (lambda < 0 || pi < 0 || pi > 1) return(rep(NA_real_, length(q)))
+    ifelse(q < 0, 0, pi + (1 - pi) * ppois(q, lambda))
+}
+qzip <- function(p, lambda, pi) {
+    if (!length(p)) return(numeric(0))
+    if (lambda < 0 || pi < 0 || pi > 1) return(rep(NA_real_, length(p)))
+    adj <- (p - pi) / (1 - pi)
+    adj[adj < 0] <- 0
+    adj[adj > 1] <- 1
+    ifelse(p <= pi, 0, qpois(adj, lambda))
+}
+dzinb <- function(x, mu, size, pi) {
+    ifelse(x == 0, pi + (1 - pi) * dnbinom(0, mu = mu, size = size), (1 - pi) * dnbinom(x, mu = mu, size = size))
+}
+pzinb <- function(q, mu, size, pi) {
+    result <- numeric(length(q))
+    for (i in seq_along(q)) {
+        if (q[i] < 0) {
+            result[i] <- 0
+        } else {
+            result[i] <- pi + (1 - pi) * pnbinom(q[i], mu = mu, size = size)
+        }
+    }
+    return(result)
+}
+qzinb <- function(p, mu, size, pi) {
+    ifelse(p <= pi, 0, qnbinom((p - pi) / (1 - pi), mu = mu, size = size))
+}
+
+# --- Fit Distributions ---
+fit_pois <- fitdist(
+    data = modeldata_t$CTC_count,
+    distr = "pois",
+    start = list(lambda = mean(modeldata_t$CTC_count)),
+    method = "mle",
+    discrete = TRUE
+)
+
+prop_zero <- mean(modeldata_t$CTC_count == 0)
+start_pi  <- min(0.99, prop_zero)
+nonzero_data <- modeldata_t$CTC_count[modeldata_t$CTC_count > 0]
+start_lambda <- if (length(nonzero_data)) max(0.01, mean(nonzero_data)) else 0.1
+
+fit_zip <- fitdist(
+    data = modeldata_t$CTC_count,
+    distr = dzip,
+    start = list(lambda = start_lambda, pi = start_pi),
+    method = "mle",
+    discrete = TRUE,
+    optim.method = "L-BFGS-B",
+    lower = c(0, 0),
+    upper = c(Inf, 1)
+)
+fit_zip$cdist <- pzip
+fit_zip$qdist <- qzip
+
+mean_val <- mean(modeldata_t$CTC_count)
+var_val <- var(modeldata_t$CTC_count)
+mu_init <- mean(modeldata_t$CTC_count[modeldata_t$CTC_count > 0])
+size_init <- max(0.1, mu_init^2 / max(0.1, var_val - mu_init))
+nb_zeros_prob <- dnbinom(0, mu = mu_init, size = size_init)
+pi_init_zinb <- max(0, min(0.9, (prop_zero - nb_zeros_prob) / (1 - nb_zeros_prob)))
+
+fit_zinb <- fitdist(modeldata_t$CTC_count, dzinb, 
+                    start = list(mu = mu_init, size = size_init, pi = pi_init_zinb), 
+                    lower = c(mu = 0.001, size = 0.001, pi = 0), 
+                    upper = c(mu = Inf, size = Inf, pi = 0.999))
+mu_est <- fit_zinb$estimate["mu"]
+size_est <- fit_zinb$estimate["size"]
+pi_est_zinb <- fit_zinb$estimate["pi"]
+
+# --- Summaries ---
+cat("\n--- Poisson ---\n")
+print(summary(fit_pois))
+cat("\n--- ZINB ---\n")
+print(summary(fit_zinb))
+
+# --- PMF Bar Plot: Empirical, Poisson, ZINB ---
+x_vals <- 0:max(modeldata_t$CTC_count)
+emp_counts <- table(factor(modeldata_t$CTC_count, levels = x_vals))
+emp_probs <- emp_counts / sum(emp_counts)
+pois_probs <- dpois(x_vals, fit_pois$estimate["lambda"])
+zinb_probs <- sapply(x_vals, function(x) dzinb(x, fit_zinb$estimate["mu"], fit_zinb$estimate["size"], fit_zinb$estimate["pi"]))
+
+# --- Chi-square goodness-of-fit tests ---
+observed <- as.numeric(emp_counts)
+expected_pois <- sum(observed) * pois_probs
+expected_zinb <- sum(observed) * zinb_probs
+
+# Optional: combine higher counts into a single bin if any expected < 5
+# See explanation above if you need to do this
+
+chisq_pois <- chisq.test(x = observed, p = pois_probs, rescale.p = TRUE, simulate.p.value = TRUE)
+chisq_zinb <- chisq.test(x = observed, p = zinb_probs, rescale.p = TRUE, simulate.p.value = TRUE)
+
+cat("\n--- Chi-square goodness-of-fit: Poisson ---\n")
+print(chisq_pois)
+cat("\n--- Chi-square goodness-of-fit: ZINB ---\n")
+print(chisq_zinb)
+
+chisq_text <- paste0(
+    "Chisq Poisson: ", formatC(chisq_pois$statistic, format = "f", digits = 2),
+    " (p = ", formatC(chisq_pois$p.value, format = "f", digits = 3), ")\n",
+    "Chisq ZINB: ", formatC(chisq_zinb$statistic, format = "f", digits = 2),
+    " (p = ", formatC(chisq_zinb$p.value, format = "f", digits = 3), ")"
+)
+
+df_pmf <- data.frame(
+    x = rep(x_vals, 3),
+    probability = c(emp_probs, pois_probs, zinb_probs),
+    Model = rep(c("Empirical", "Poisson", "ZINB"), each = length(x_vals))
+)
+
+pmf_plot <- ggplot(df_pmf, aes(x = factor(x), y = probability, fill = Model)) +
+    geom_bar(stat = "identity", position = position_dodge(width = 0.9), alpha = 0.85) +
+    labs(
+        title = "CTC Count Distribution: Empirical vs. Modeled (Poisson and ZINB)",
+        x = "Observed CTC Count",
+        y = "Probability Mass Function (PMF)"
+    ) +
+    scale_fill_manual(values = c(
+        "Empirical" = "#1E4160",
+        "Poisson"   = "#F8766D",
+        "ZINB"      = "#00BFC4"
+    )) +
+    theme_minimal(base_size = 12) +
+    theme(
+        plot.title = element_text(hjust = 0.5, margin = margin(t = 5, b = 10)),
+        axis.title.y = element_text(margin = margin(r = 10)),
+        axis.title.x = element_text(margin = margin(t = 10)),
+        legend.position = "inside",
+        legend.position.inside = c(0.98, 0.98),
+        legend.justification = c("right", "top"),
+        legend.background = element_rect(fill = "white", color = "grey70"),
+        legend.box.background = element_rect(color = "black")
+    ) +
+    annotate(
+        "text",
+        x = Inf, y = 0.6,  # adjust y so it doesn't overlap
+        label = chisq_text,
+        hjust = 1.0, vjust = 1,
+        size = 3.5
+    )
+
+
+# Generate plots for both methods
+png("pmf_plot.png", width = 2400, height = 1700, res = 300)
+print(pmf_plot)
+dev.off()
+
+# --- Clean up ---
+rm(list = setdiff(ls(), .initial_objects))
+gc()
+
+```

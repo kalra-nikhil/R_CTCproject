@@ -1,0 +1,67 @@
+# Table 2 & 3: CTC counts from both methods
+```{r}
+#| eval: false
+summary_table <- function(data, filter_expr = NULL, header_text) {
+  if (!is.null(filter_expr)) {
+    data <- data |> filter(!!parse_expr(filter_expr))
+  }
+
+  data |> 
+    mutate(
+      Method01_combined = Method01_pre + Method01_post,
+      Method02_combined = Method02_pre + Method02_post
+    ) |> 
+    select(matches("^(Method).*_(pre|post|combined)$"), -Method01_preII) |> 
+    summarise(across(
+      starts_with("Method"),
+      list(
+        sum = ~sum(.x, na.rm = TRUE),
+        positive_cases = ~{
+          pos = sum(.x > 0, na.rm = TRUE)
+          total = sum(!is.na(.x))
+          sprintf("%d (%.1f%%)", pos, 100 * pos / total)
+        },
+        median = ~{
+          val = .x[.x > 0]
+          if (length(val) > 0) median(val, na.rm = TRUE) else NA_real_
+        },
+        range = ~{
+          val = .x[.x > 0]
+          if (length(val) > 0) paste0(range(val, na.rm = TRUE), collapse = " - ") else NA_character_
+        }
+      ),
+      .names = "{.col}_{.fn}"
+    )) |> 
+    mutate(across(everything(), as.character)) |> 
+    pivot_longer(
+      cols = everything(),
+      names_to = c("Method", "Stage", "Metric"),
+      names_pattern = "(Method\\d+)_(pre|post|combined)_(.*)"
+    ) |> 
+    pivot_wider(
+      names_from = Stage,
+      values_from = value
+    ) |> 
+    flextable() |> 
+    set_table_properties(width = 0.9, layout = "autofit") |> 
+    add_header_row(values = header_text, colwidths = 5) |> 
+    bold(part = "header") |> 
+    print(preview = "html")
+}
+
+# Run for both overall and malignant cases:
+summary_table(
+  rawdata_wide,
+  filter_expr = "Cancer %in% c('positive', 'negative')",
+  header_text = "CTCs identified pre-, post-biopsy and combined using two methods\n(overall cases, n=149)"
+)
+
+summary_table(
+  rawdata_wide,
+  filter_expr = "Cancer == 'positive'",
+  header_text = "CTCs identified pre-, post-biopsy and combined using two methods\n(malignant cases, n=94)"
+)
+
+rm(summary_table)
+
+```

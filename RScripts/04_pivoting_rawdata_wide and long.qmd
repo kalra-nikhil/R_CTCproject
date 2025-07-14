@@ -1,0 +1,110 @@
+# Pivoting rawdata wide for Table 1
+```{r}
+# Defining funtions 
+ctc_change <- function(delta, total) {
+  factor(case_when(
+    delta > 0 ~ "CTC_inc",
+    delta < 0 ~ "CTC_dec",
+    delta == 0 & total != 0 ~ "stable_pos",
+    TRUE ~ "stable_neg"),
+    levels = c("CTC_dec", "CTC_inc", "stable_pos", "stable_neg"))
+}
+ctc_outcome <- function(change) {
+  factor(if_else(change %in% c("CTC_dec", "stable_neg"), "fav", "unfav"),
+         levels = c("fav", "unfav"))
+}
+
+rawdata_wide <- rawdata |> 
+  filter(complete == "yes") |>
+  mutate(
+    Cancer = factor(Cancer),
+    # Age = as.ordered(Age),
+    # Menopause = factor(case_when(
+    #   Menopause %in% c("perimenopausal", "premenopausal") ~ "premenopausal",
+    #   Menopause == "postmenopausal" ~ "postmenopausal"
+    # ), levels = c("premenopausal", "postmenopausal")),
+    
+    Menopause = factor(Menopause),
+
+    CTC_total_m01 = Method01_pre + Method01_post,
+    CTC_total_m02 = Method02_pre + Method02_post,
+    CTC_pre_combined = Method01_pre + Method02_pre,
+    CTC_post_combined = Method01_post + Method02_post,
+    CTC_total_combined = CTC_pre_combined + CTC_post_combined,
+
+    CTC_delta_m01 = Method01_post - Method01_pre,
+    CTC_delta_m02 = Method02_post - Method02_pre,
+    CTC_delta_combined = CTC_post_combined - CTC_pre_combined,
+
+    CTCchange_m01 = ctc_change(CTC_delta_m01, CTC_total_m01),
+    CTCchange_m02 = ctc_change(CTC_delta_m02, CTC_total_m02),
+    CTCchange_combined = ctc_change(CTC_delta_combined, CTC_total_combined),
+
+    CTCoutcome_m01 = ctc_outcome(CTCchange_m01),
+    CTCoutcome_m02 = ctc_outcome(CTCchange_m02),
+    CTCoutcome_combined = ctc_outcome(CTCchange_combined),
+
+    patho_ER_f = factor(if_else(patho_ER == 0, "low (<=15%)", "high (>15%)"),
+                        levels = c("low (<=15%)", "high (>15%)")),
+    patho_PR_f = factor(if_else(patho_PR == 0, "low (<=15%)", "high (>15%)"),
+                        levels = c("low (<=15%)", "high (>15%)")),
+    patho_HER2_f = factor(patho_HER2),
+    patho_Ki67_f = factor(if_else(patho_Ki67 <= 15, "low (<=15%)", "high (>15%)"),
+                          levels = c("low (<=15%)", "high (>15%)")),
+
+    # T_stage_f = factor(if_else(T_stage <= 2, "Ti+T1+T2", "T3+T4"),
+    #                    levels = c("Ti+T1+T2", "T3+T4")),
+    # N_stage_f = factor(case_when(
+    #   N_stage == 0 ~ "N0",
+    #   N_stage == "x" ~ "Nx",
+    #   N_stage == 1 ~ "N1"
+    # )),
+    # M_stage_f = factor(case_when(
+    #   M_stage == 0 ~ "M0",
+    #   M_stage == "x" ~ "Mx",
+    #   M_stage == 1 ~ "M1"
+    # )),
+    # G_stage_f = factor(if_else(G_stage <= 2, "G1+G2", "G3"),
+    #                    levels = c("G1+G2", "G3")),
+    
+    T_stage_f = factor(case_when(T_stage == "i" ~ "Tis",
+                        T_stage %in% c(1, 2) ~ "T1+T2",
+                        T_stage %in% c(3, 4) ~ "T3+T4",
+                        TRUE ~ "NA")),
+    N_stage_f = factor(case_when(N_stage == 0 ~ "N0",
+                        N_stage == 1 ~ "N1",
+                        N_stage == "x" ~ "Nx",
+                        TRUE ~ "NA")),
+    M_stage_f = factor(case_when(M_stage == 0 ~ "M0",
+                        M_stage %in% c("x", "X") ~ "Mx",
+                        M_stage == 1 ~ "M1",
+                        TRUE ~ "NA")),
+    G_stage_f = factor(case_when(G_stage %in% c(1, 2) ~ "G1+G2",
+                        G_stage == 3 ~ "G3",
+                        TRUE ~ "NA")),
+    
+    L_stage_f = factor(if_else(L_stage == 0, "low", "high")),
+    V_stage_f = factor(if_else(V_stage == 0, "low", "high")),
+    n_stage_f = factor(if_else(n_stage == 0, "low", "high")),
+    R_stage_f = factor(if_else(R_stage == 0, "low", "high"))
+  )
+
+```
+
+# Pivoting rawdata long for Method column
+```{r}
+data <- rawdata_wide |>
+   select(Patient_ID, Cancer, Age, Menopause, Stanze_type, contains(c("Method", "CTCchange_m0")), -Method01_preII, -contains("_old"),
+         matches("biopsy|patho_|_stage")) |> 
+  # Reshape data from wide to long
+  pivot_longer(
+  cols = starts_with("Method"),
+  names_to = c("Method", "Timepoint"),
+  names_pattern = "(Method\\d+)_(pre|post)",
+  values_to = "CTC_count") |> 
+  mutate( Timepoint = factor(Timepoint,
+                             levels = c("pre","post"),
+                             labels = c("pre_biopsy", "post_biopsy")),
+          Method = factor(Method, levels = c("Method01", "Method02"))) # |> view()
+
+```

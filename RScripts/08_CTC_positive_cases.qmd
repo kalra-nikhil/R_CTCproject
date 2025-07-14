@@ -1,0 +1,231 @@
+# Overall CTC+ cases: Wilcoxon, McNemar, Kendall's tau, Cohen's kappa
+```{r}
+#| eval: false
+# Prepare binary and numeric lists from rawdata
+Method01_ctc <- list(
+  pre = rawdata_wide |>
+    pull(Method01_pre),
+  post = rawdata_wide |>
+    pull(Method01_post),
+  combined = rawdata_wide |>
+    pull(CTC_total_m01)
+)
+
+Method02_ctc <- list(
+  pre = rawdata_wide |>
+    pull(Method02_pre),
+  post = rawdata_wide |>
+    pull(Method02_post),
+  combined = rawdata_wide |>
+    pull(CTC_total_m02)
+)
+
+# Binary classification for > 0 CTCs
+Method01_binary <- list(
+  pre = ifelse(Method01_ctc$pre > 0, 1, 0),
+  post = ifelse(Method01_ctc$post > 0, 1, 0),
+  combined = ifelse(Method01_ctc$combined > 0, 1, 0)
+)
+
+Method02_binary <- list(
+  pre = ifelse(Method02_ctc$pre > 0, 1, 0),
+  post = ifelse(Method02_ctc$post > 0, 1, 0),
+  combined = ifelse(Method02_ctc$combined > 0, 1, 0)
+)
+
+# Check lengths for pairing validity
+if (length(Method01_binary$pre) != length(Method02_binary$pre)) stop("Pre data lengths mismatch")
+if (length(Method01_binary$post) != length(Method02_binary$post)) stop("Post data lengths mismatch")
+if (length(Method01_binary$combined) != length(Method02_binary$combined)) stop("Combined data lengths mismatch")
+
+# Wilcoxon tests
+wilcoxon_pre <- wilcox.test(Method01_ctc$pre, Method02_ctc$pre, paired = TRUE, exact = FALSE)$p.value
+wilcoxon_post <- wilcox.test(Method01_ctc$post, Method02_ctc$post, paired = TRUE, exact = FALSE)$p.value
+wilcoxon_combined <- wilcox.test(Method01_ctc$combined, Method02_ctc$combined, paired = TRUE, exact = FALSE)$p.value
+
+# McNemar tests
+table_pre <- table(Method01_binary$pre, Method02_binary$pre)
+table_post <- table(Method01_binary$post, Method02_binary$post)
+table_combined <- table(Method01_binary$combined, Method02_binary$combined)
+
+McNemar_pre <- mcnemar.test(table_pre)$p.value
+McNemar_post <- mcnemar.test(table_post)$p.value
+McNemar_combined <- mcnemar.test(table_combined)$p.value
+
+# Kendall's Tau correlations
+tau_pre <- cor.test(Method01_ctc$pre, Method02_ctc$pre, method = "kendall")
+tau_post <- cor.test(Method01_ctc$post, Method02_ctc$post, method = "kendall")
+tau_combined <- cor.test(Method01_ctc$combined, Method02_ctc$combined, method = "kendall")
+
+# Cohen's Kappa for agreement
+kappa_pre <- kappa2(cbind(Method01_binary$pre, Method02_binary$pre))
+kappa_post <- kappa2(cbind(Method01_binary$post, Method02_binary$post))
+kappa_combined <- kappa2(cbind(Method01_binary$combined, Method02_binary$combined))
+
+# Combine and print results
+data.frame(
+  Statistic = c("Wilcoxon", "McNemar", "Kendall's Tau", "Cohen's Kappa"),
+  Pre = c(
+    round(wilcoxon_pre, 4),
+    round(McNemar_pre, 4),
+    paste0(round(tau_pre$estimate, 4), " (p=", round(tau_pre$p.value, 4), ")"),
+    paste0(round(kappa_pre$value, 4), " (p=", round(kappa_pre$p.value, 4), ")")
+  ),
+  Post = c(
+    round(wilcoxon_post, 4),
+    round(McNemar_post, 4),
+    paste0(round(tau_post$estimate, 4), " (p=", round(tau_post$p.value, 4), ")"),
+    paste0(round(kappa_post$value, 4), " (p=", round(kappa_post$p.value, 4), ")")
+  ),
+  Combined = c(
+    round(wilcoxon_combined, 4),
+    round(McNemar_combined, 4),
+    paste0(round(tau_combined$estimate, 4), " (p=", round(tau_combined$p.value, 4), ")"),
+    paste0(round(kappa_combined$value, 4), " (p=", round(kappa_combined$p.value, 4), ")")
+  )
+) |>
+  flextable() |>
+  set_caption(caption = "Overall cases: Pre-, Post- and Combined Analysis") |>
+  autofit()
+
+
+## Method02: Prepare contingency matrices for pre and post
+# contingency_pre <- matrix(c(sum(Method01_binary$pre == 1 & Method02_binary$pre == 1),
+#                          sum(Method01_binary$pre == 1 & Method02_binary$pre == 0),
+#                          sum(Method01_binary$pre == 0 & Method02_binary$pre == 1),
+#                          sum(Method01_binary$pre == 0 & Method02_binary$pre == 0)),
+#                          nrow = 2)
+# 
+# contingency_post <- matrix(c(sum(Method01_binary$post == 1 & Method02_binary$post == 1),
+#                          sum(Method01_binary$post == 1 & Method02_binary$post == 0),
+#                          sum(Method01_binary$post == 0 & Method02_binary$post == 1),
+#                          sum(Method01_binary$post == 0 & Method02_binary$post == 0)),
+#                          nrow = 2)
+# contingency_combined <- matrix(c(sum(Method01_binary$combined == 1 &                         #                                      Method02_binary$combined == 1),
+#                          sum(Method01_binary$combined == 1 & Method02_binary$combined == 0),
+#                          sum(Method01_binary$combined == 0 & Method02_binary$combined == 1),
+#                          sum(Method01_binary$combined == 0 & Method02_binary$combined == 0)),
+#                          nrow = 2)
+
+rm(
+  Method01_ctc, Method02_ctc,
+  Method01_binary, Method02_binary,
+  wilcoxon_pre, wilcoxon_post, wilcoxon_combined,
+  table_pre, table_post, table_combined,
+  McNemar_pre, McNemar_post, McNemar_combined,
+  tau_pre, tau_post, tau_combined,
+  kappa_pre, kappa_post, kappa_combined
+)
+
+```
+
+## Malignant CTC+ cases: Wilcoxon, McNemar, Kendall's tau, Cohen's kappa
+```{r}
+#| eval: false
+#| 
+Method01_ctc <- list(
+  pre = rawdata_wide |> 
+    filter(Cancer == "positive") |> 
+    pull(Method01_pre),
+  post = rawdata_wide |>
+    filter(Cancer == "positive") |> 
+    pull(Method01_post),
+  combined = rawdata_wide |>
+    filter(Cancer == "positive") |> 
+    pull(CTC_total_m01)
+)
+
+Method02_ctc <- list(
+  pre = rawdata_wide |>
+    filter(Cancer == "positive") |> 
+    pull(Method02_pre),
+  post = rawdata_wide |>
+    filter(Cancer == "positive") |> 
+    pull(Method02_post),
+  combined = rawdata_wide |>
+    filter(Cancer == "positive") |> 
+    pull(CTC_total_m02)
+)
+
+## Binary outcomes (positive or negative outcome) for each method
+Method01_binary <- list(
+  pre = ifelse(Method01_ctc$pre > 0, 1, 0),
+  post = ifelse(Method01_ctc$post > 0, 1, 0),
+  combined = ifelse(Method01_ctc$combined > 0, 1, 0))
+
+Method02_binary <- list(
+  pre = ifelse(Method02_ctc$pre > 0, 1, 0),
+  post = ifelse(Method02_ctc$post > 0, 1, 0),
+  combined = ifelse(Method02_ctc$combined > 0, 1, 0))
+
+# Ensure both datasets are paired (same number of observations)
+if (length(Method01_binary$pre) != length(Method02_binary$pre)) {
+  stop("The data lengths for 'pre' measurements do not match!")
+}
+
+if (length(Method01_binary$post) != length(Method02_binary$post)) {
+  stop("The data lengths for 'post' measurements do not match!")
+}
+
+if (length(Method01_binary$combined) != length(Method02_binary$combined)) {
+  stop("The data lengths for 'post' measurements do not match!")
+}
+
+wilcoxon_pre <- wilcox.test(Method01_ctc$pre, Method02_ctc$pre, paired = TRUE, exact=FALSE)$p.value
+wilcoxon_post <- wilcox.test(Method01_ctc$post, Method02_ctc$post, paired = TRUE, exact=FALSE)$p.value
+wilcoxon_combined <- wilcox.test(Method01_ctc$combined, Method02_ctc$combined, paired = TRUE, exact=FALSE)$p.value
+
+# McNemar Test
+# prepare tables for McNemar's test
+table_pre <- table(Method01_binary$pre, Method02_binary$pre)
+table_post <- table(Method01_binary$post, Method02_binary$post)
+table_combined <- table(Method01_binary$combined, Method02_binary$combined)
+
+# McNemar p-values
+McNemar_pre <- mcnemar.test(table_pre)$p.value
+McNemar_post <- mcnemar.test(table_post)$p.value
+McNemar_combined <- mcnemar.test(table_combined)$p.value
+
+# Kendall's Tau estimates: Correlation between CTC numbers
+tau_pre <- cor.test(Method01_ctc$pre, Method02_ctc$pre, method="kendall")
+tau_post <- cor.test(Method01_ctc$post, Method02_ctc$post, method="kendall")
+tau_combined <- cor.test(Method01_ctc$combined, Method02_ctc$combined, method="kendall")
+
+# Cohen's kappa for Pre- and Post-biopsy
+kappa_pre <- kappa2(cbind(Method01_binary$pre, Method02_binary$pre))
+kappa_post <- kappa2(cbind(Method01_binary$post, Method02_binary$post))
+kappa_combined <- kappa2(cbind(Method01_binary$combined, Method02_binary$combined))
+
+# print results
+data.frame(
+  Statistic = c("Wilcoxon", "McNemar", "Kendall's Tau", "Cohen's Kappa"),
+  Pre = c(
+    round(wilcoxon_pre, 4),
+    round(McNemar_pre, 4),
+    paste0(round(tau_pre$estimate, 4), " (p=", round(tau_pre$p.value, 4), ")"),
+    paste0(round(kappa_pre$value, 4), " (p=", round(kappa_pre$p.value, 4), ")")),
+  Post = c(
+    round(wilcoxon_post, 4),
+    round(McNemar_post, 4),
+    paste0(round(tau_post$estimate, 4), " (p=", round(tau_post$p.value, 4), ")"),
+    paste0(round(kappa_post$value, 4), " (p=", round(kappa_post$p.value, 4), ")")),
+  Combined = c(
+    round(wilcoxon_combined, 4),
+    round(McNemar_combined, 4),
+    paste0(round(tau_combined$estimate, 4), " (p=", round(tau_combined$p.value, 4), ")"),
+    paste0(round(kappa_combined$value, 4), " (p=", round(kappa_combined$p.value, 4), ")"))) |>
+  flextable() |>
+    set_caption(caption = "Malignant cases: Pre-, Post- and Combined Analysis") |>
+    autofit()
+
+rm(
+  Method01_ctc, Method02_ctc,
+  Method01_binary, Method02_binary,
+  wilcoxon_pre, wilcoxon_post, wilcoxon_combined,
+  table_pre, table_post, table_combined,
+  McNemar_pre, McNemar_post, McNemar_combined,
+  tau_pre, tau_post, tau_combined,
+  kappa_pre, kappa_post, kappa_combined
+)
+
+```
